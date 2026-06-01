@@ -7,12 +7,13 @@ Wires the pieces into the sequential, maker-checker flow:
                                   ^                      |
                                   +---- revise <---------+  (if issues)
 
-The pipeline owns the control flow; tools and agents stay unaware of each other.
+Optionally saves the final README to a .md file via the output tool.
 """
 
 import json
 
 from doc_agent.tools.extractor import extract_from_directory
+from doc_agent.tools.output import save_markdown, strip_code_fence
 from doc_agent.agents.writer import WriterAgent
 from doc_agent.agents.reviewer import ReviewerAgent
 
@@ -25,7 +26,7 @@ class DocumentationPipeline:
         self.reviewer = ReviewerAgent()
         self.max_rounds = max_rounds
 
-    async def run(self, project_path) -> dict:
+    async def run(self, project_path, output_path=None) -> dict:
         # 1. TOOL: deterministic fact extraction (no LLM).
         facts = extract_from_directory(project_path)
 
@@ -45,16 +46,26 @@ class DocumentationPipeline:
                 break
             draft = await self.writer.revise(facts, draft, verdict["issues"])
 
-        return {"readme": draft, "review_trace": trace}
+        readme = strip_code_fence(draft)
+        result = {"readme": readme, "review_trace": trace}
+
+        # 4. TOOL: optionally save the README to a .md file.
+        if output_path:
+            result["saved_to"] = save_markdown(output_path, readme)
+
+        return result
 
 
-# Run end to end from the terminal: python -m doc_agent.workflow.pipeline <path>
+# Generate + save: python -m doc_agent.workflow.pipeline doc_agent README.md
 if __name__ == "__main__":
     import asyncio
     import sys
 
-    target = sys.argv[1] if len(sys.argv) > 1 else "doc_agent"
-    out = asyncio.run(DocumentationPipeline().run(target))
+    project = sys.argv[1] if len(sys.argv) > 1 else "doc_agent"
+    output = sys.argv[2] if len(sys.argv) > 2 else None
+    out = asyncio.run(DocumentationPipeline().run(project, output))
     print(out["readme"])
-    print("\n\n--- REVIEW TRACE ---")
+    if out.get("saved_to"):
+        print(f"\n\nSaved README to: {out['saved_to']}")
+    print("\n--- REVIEW TRACE ---")
     print(json.dumps(out["review_trace"], indent=2))

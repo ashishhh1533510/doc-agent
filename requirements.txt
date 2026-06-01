@@ -2,3 +2,6 @@ agent-framework
 python-dotenv
 fastapi
 uvicorn[standard]
+faiss-cpu
+numpy
+openai
