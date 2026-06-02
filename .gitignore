@@ -1,5 +1,23 @@
+@"
 .venv/
 __pycache__/
 *.pyc
 .env
-.DS_Store
+# generated test artifacts
+architecture.*
+*.drawio
+*.gv
+*.mmd
+final.drawio
+docs.html
+docs.md
+facts.json
+spec.yaml
+*_spec.yaml
+t1.yaml
+t2.json
+t3.yaml
+t4_readme.md
+t5.drawio
+test4_repo.json
+"@ | Out-File -FilePath .gitignore -Encoding utf8 -Append

@@ -8,15 +8,19 @@ The codebase-QA pipeline: RAG orchestration.
 from doc_agent.tools.extractor import extract_from_directory
 from doc_agent.rag.indexer import CodebaseIndex
 from doc_agent.agents.qa import QAAgent
+from doc_agent.tools.input_resolver import resolve_input
+from doc_agent.tools.output import slim_facts_for_llm
 
 
 class CodebaseQA:
     """Builds a RAG index over a codebase, then answers questions about it."""
 
-    def __init__(self, project_path):
-        facts = extract_from_directory(project_path)   # TOOL: extract
-        self.index = CodebaseIndex(facts)              # RAG: embed + FAISS
-        self.qa = QAAgent()                            # AGENT
+    def __init__(self, project_path, token=None):
+        with resolve_input(project_path, token) as code_dir:
+            facts = extract_from_directory(code_dir)    # TOOL: extract (clone alive here)
+            llm_facts = slim_facts_for_llm(facts)   # trimmed payload for LLM calls
+        self.index = CodebaseIndex(llm_facts)               # RAG: embed + FAISS (in memory)
+        self.qa = QAAgent()                             # AGENT                          # AGENT
 
     async def ask(self, question: str, k: int = 4) -> dict:
         retrieved = self.index.search(question, k=k)   # RAG retrieval

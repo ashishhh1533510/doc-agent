@@ -15,12 +15,15 @@ _qa_cache: dict[str, CodebaseQA] = {}
 
 class GenerateRequest(BaseModel):
     project_path: str
-    output_path: str | None = None   # optional: also save the README to this .md file
+    format: str = "md"               # md | html | json | yaml | mermaid | png | svg | dot | drawio | drawio_xml
+    output_path: str | None = None
+    token: str | None = None         # optional, for private git repos
 
 
 class AskRequest(BaseModel):
     project_path: str
     question: str
+    token: str | None = None         # optional, for private git repos
 
 
 @app.get("/health")
@@ -30,13 +33,16 @@ def health():
 
 @app.post("/generate-readme")
 async def generate_readme_endpoint(req: GenerateRequest):
-    return await pipeline.run(req.project_path, req.output_path)
+    return await pipeline.run(
+        req.project_path, fmt=req.format,
+        output_path=req.output_path, token=req.token,
+    )
 
 
 @app.post("/ask")
 async def ask_endpoint(req: AskRequest):
     if req.project_path not in _qa_cache:
-        _qa_cache[req.project_path] = CodebaseQA(req.project_path)
+        _qa_cache[req.project_path] = CodebaseQA(req.project_path, token=req.token)
     return await _qa_cache[req.project_path].ask(req.question)
 
 

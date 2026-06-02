@@ -1,39 +1,57 @@
 """
-The documentation pipeline: orchestration.
+The documentation pipeline: orchestration with format selection.
 
-Wires the pieces into the sequential, maker-checker flow:
+  md / html              -> prose docs via the writer + maker-checker review loop
+  json / yaml            -> the extracted facts as a structured spec (no LLM)
+  mermaid                -> an architecture diagram via the diagrammer agent
+  png / svg              -> typed architecture image (diagrams library)
+  dot / drawio / drawio_xml -> editable architecture exports
 
-    extract facts (tool) -> write draft (agent) -> review (agent)
-                                  ^                      |
-                                  +---- revise <---------+  (if issues)
+The pipeline picks the right producer for the requested format, then optionally
+saves the result to disk via the output tool.
 
-Optionally saves the final README to a .md file via the output tool.
+Inputs can be a local directory, a single .py file, or a git repo URL — the
+input resolver normalizes all of them to a local directory before extraction.
+
+LLM-bound formats receive a slimmed-down facts payload (slim_facts_for_llm) to
+stay under the model's per-minute input-token limit on large repos. json/yaml
+always use the full facts since they cost no LLM calls and need full detail.
 """
 
 import json
 
 from doc_agent.tools.extractor import extract_from_directory
-from doc_agent.tools.output import save_markdown, strip_code_fence
+from doc_agent.tools.output import (
+    markdown_to_html, save_text, slim_facts_for_llm, strip_code_fence, to_json, to_yaml,
+)
 from doc_agent.agents.writer import WriterAgent
 from doc_agent.agents.reviewer import ReviewerAgent
+from doc_agent.agents.diagrammer import DiagrammerAgent
+from doc_agent.tools.input_resolver import resolve_input
+
+
+PROSE_FORMATS = {"md", "html"}
+STRUCTURED_FORMATS = {"json", "yaml"}
+DIAGRAM_FORMATS = {"mermaid"}
+IMAGE_FORMATS = {"png", "svg"}
+EDITABLE_FORMATS = {"drawio", "dot", "drawio_xml"}
+SUPPORTED_FORMATS = (
+    PROSE_FORMATS | STRUCTURED_FORMATS | DIAGRAM_FORMATS | IMAGE_FORMATS | EDITABLE_FORMATS
+)
 
 
 class DocumentationPipeline:
-    """Runs the full extract -> write -> review -> revise loop."""
+    """Generates documentation in a chosen format from a codebase."""
 
     def __init__(self, max_rounds: int = 2):
         self.writer = WriterAgent()
         self.reviewer = ReviewerAgent()
+        self.diagrammer = DiagrammerAgent()
         self.max_rounds = max_rounds
 
-    async def run(self, project_path, output_path=None) -> dict:
-        # 1. TOOL: deterministic fact extraction (no LLM).
-        facts = extract_from_directory(project_path)
-
-        # 2. AGENT: write the first draft.
+    async def _write_reviewed_markdown(self, facts):
+        """Run the writer + maker-checker loop; return (markdown, review_trace)."""
         draft = await self.writer.write(facts)
-
-        # 3. AGENT: maker-checker loop -- review, and revise if needed.
         trace = []
         for round_num in range(1, self.max_rounds + 1):
             verdict = await self.reviewer.review(facts, draft)
@@ -45,27 +63,82 @@ class DocumentationPipeline:
             if verdict["approved"]:
                 break
             draft = await self.writer.revise(facts, draft, verdict["issues"])
+        return strip_code_fence(draft), trace
 
-        readme = strip_code_fence(draft)
-        result = {"readme": readme, "review_trace": trace}
+    async def run(self, project_path, fmt: str = "md", output_path=None, token=None) -> dict:
+        if fmt not in SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unsupported format '{fmt}'. Choose from: {sorted(SUPPORTED_FORMATS)}"
+            )
 
-        # 4. TOOL: optionally save the README to a .md file.
-        if output_path:
-            result["saved_to"] = save_markdown(output_path, readme)
+        with resolve_input(project_path, token) as code_dir:
+            facts = extract_from_directory(code_dir)
+            llm_facts = slim_facts_for_llm(facts)   # trimmed payload for LLM calls
+            result = {"format": fmt}
 
-        return result
+            # --- image diagrams (1 LLM call) -> slim payload ---
+            if fmt in IMAGE_FORMATS:
+                saved = await self.diagrammer.diagram_typed(
+                    llm_facts, output_path or f"architecture.{fmt}", fmt=fmt
+                )
+                result["saved_to"] = saved
+                result["content"] = f"[image written to {saved}]"
+                return result
+
+            if fmt == "drawio":
+                saved = await self.diagrammer.diagram_editable(
+                    llm_facts, output_path or "architecture.svg"
+                )
+                result["saved_to"] = saved
+                result["content"] = f"[editable SVG written to {saved}]"
+                return result
+
+            if fmt == "dot":
+                saved = await self.diagrammer.diagram_dot(
+                    llm_facts, output_path or "architecture.gv"
+                )
+                result["saved_to"] = saved
+                result["content"] = f"[Graphviz DOT source written to {saved}]"
+                return result
+
+            if fmt == "drawio_xml":
+                saved = await self.diagrammer.diagram_drawio(
+                    llm_facts, output_path or "architecture.drawio"
+                )
+                result["saved_to"] = saved
+                result["content"] = f"[draw.io file written to {saved}]"
+                return result
+
+            # --- structured spec (0 LLM calls) -> FULL facts ---
+            if fmt in STRUCTURED_FORMATS:
+                content = to_json(facts) if fmt == "json" else to_yaml(facts)
+            # --- mermaid diagram (1 LLM call) -> slim payload ---
+            elif fmt in DIAGRAM_FORMATS:
+                content = strip_code_fence(await self.diagrammer.diagram(llm_facts))
+            # --- prose: md or html (writer + reviewer) -> slim payload ---
+            else:
+                markdown, trace = await self._write_reviewed_markdown(llm_facts)
+                result["review_trace"] = trace
+                content = markdown_to_html(markdown) if fmt == "html" else markdown
+
+            result["content"] = content
+            if output_path:
+                result["saved_to"] = save_text(output_path, content)
+            return result
 
 
-# Generate + save: python -m doc_agent.workflow.pipeline doc_agent README.md
+# Generate + save: python -m doc_agent.workflow.pipeline <project> <format> <output_file>
 if __name__ == "__main__":
     import asyncio
     import sys
 
     project = sys.argv[1] if len(sys.argv) > 1 else "doc_agent"
-    output = sys.argv[2] if len(sys.argv) > 2 else None
-    out = asyncio.run(DocumentationPipeline().run(project, output))
-    print(out["readme"])
+    fmt = sys.argv[2] if len(sys.argv) > 2 else "md"
+    output = sys.argv[3] if len(sys.argv) > 3 else None
+    out = asyncio.run(DocumentationPipeline().run(project, fmt, output))
+    print(out["content"])
     if out.get("saved_to"):
-        print(f"\n\nSaved README to: {out['saved_to']}")
-    print("\n--- REVIEW TRACE ---")
-    print(json.dumps(out["review_trace"], indent=2))
+        print(f"\n\nSaved to: {out['saved_to']}")
+    if out.get("review_trace"):
+        print("\n--- REVIEW TRACE ---")
+        print(json.dumps(out["review_trace"], indent=2))

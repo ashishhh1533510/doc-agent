@@ -1,142 +1,214 @@
-# Doc Agent: LLM-powered Documentation and Codebase QA
+# Doc Agent
 
-This project provides a system for automatically generating and reviewing codebase documentation (READMEs) and answering questions about codebases using LLM agents and Retrieval-Augmented Generation (RAG). It leverages a maker-checker loop for documentation generation, ensuring factuality based on extracted code structure.
+This project provides an automated system for generating documentation and answering questions about a codebase. It leverages Large Language Models (LLMs) and Retrieval-Augmented Generation (RAG) techniques to extract information, write documentation, and provide context-aware answers.
 
 ## Overview
 
-The `doc_agent` project is structured into several key modules, each responsible for a specific part of the documentation and QA pipelines:
+The Doc Agent project is structured into several key modules, each responsible for a specific aspect of the documentation and QA process:
 
-*   **`doc_agent.agents`**: Contains the core LLM-driven agents responsible for writing, reviewing, and answering questions about codebases.
-    *   **`qa`**: Implements the agent for answering questions about a codebase from retrieved facts.
-    *   **`reviewer`**: Implements the agent that fact-checks generated READMEs against extracted facts, acting as the "checker" in the maker-checker loop.
-    *   **`writer`**: Implements the agent that generates and revises READMEs from extracted codebase facts.
-*   **`doc_agent.api`**: Exposes the core functionalities (documentation generation and codebase QA) via a FastAPI HTTP API.
-*   **`doc_agent.core`**: Provides core utilities, specifically for interacting with the Gemini LLM for agent interactions and embeddings.
-*   **`doc_agent.rag`**: Handles Retrieval-Augmented Generation (RAG) components, enabling agents to work with codebases too large to fit in a single prompt.
-    *   **`indexer`**: Manages the creation and searching of a FAISS vector index built from extracted codebase facts.
-*   **`doc_agent.tools`**: Contains deterministic utility tools that do not involve LLMs.
-    *   **`extractor`**: Scans Python source code to extract its structure (functions, classes, signatures, docstrings) as "ground truth" facts.
-    *   **`output`**: Handles saving generated markdown or JSON documentation to disk.
-*   **`doc_agent.workflow`**: Orchestrates the entire documentation and QA pipelines.
-    *   **`pipeline`**: Manages the sequential maker-checker flow for README generation: fact extraction -> draft writing -> review -> revision.
-    *   **`qa`**: Manages the RAG-based codebase QA pipeline: fact extraction -> indexing -> retrieval -> answering.
+*   **`doc_agent.agents`**: Contains various LLM-driven agents responsible for specific tasks like writing documentation (`writer`), reviewing it (`reviewer`), generating architecture diagrams (`diagrammer`), and answering questions (`qa`).
+*   **`doc_agent.api`**: Exposes the core functionalities of the Doc Agent through a FastAPI web application, making it accessible via HTTP requests.
+*   **`doc_agent.core`**: Provides the foundational components for interacting with LLMs, including functions to build agents and generate text embeddings.
+*   **`doc_agent.rag`**: Implements the Retrieval-Augmented Generation (RAG) components, specifically an indexer for creating searchable vector indexes of codebase facts, and a search function.
+*   **`doc_agent.tools`**: Offers utility functions for various tasks, including extracting code structure from Python source files (`extractor`), and formatting/saving generated documentation in different formats (`output`).
+*   **`doc_agent.workflow`**: Orchestrates the execution of the documentation and QA pipelines, coordinating the use of agents and tools to achieve the desired outcomes.
 
 ## Usage / API Reference
 
-This section details the main functions and classes available in the `doc_agent` project.
+### `doc_agent.agents.diagrammer`
+
+#### Class `DiagrammerAgent`
+
+Produces a high-level architecture diagram: the LLM models it, code renders it.
+
+*   **`__init__(self)`**:
+    Initializes the `DiagrammerAgent`.
+
+*   **`async diagram(self, facts) -> str`**:
+    Analyze the codebase into an architecture model, then render it to Mermaid.
 
 ### `doc_agent.agents.qa`
 
-QA agent (LLM-driven): answers questions about a codebase from retrieved facts.
-
-#### `class QAAgent`
+#### Class `QAAgent`
 
 An LLM agent that answers codebase questions from retrieved context.
 
-*   `__init__(self)`
-*   `async answer(self, question: str, chunks: list[dict]) -> str`
-    *   Answer the question using the retrieved chunks as context.
+*   **`__init__(self)`**:
+    Initializes the `QAAgent`.
+
+*   **`async answer(self, question: str, chunks: list[dict]) -> str`**:
+    Answer the question using the retrieved chunks as context.
 
 ### `doc_agent.agents.reviewer`
 
-Reviewer agent (LLM-driven): the "checker" in the maker-checker loop.
-
-#### `class ReviewerAgent`
+#### Class `ReviewerAgent`
 
 An LLM agent that fact-checks a README against extracted facts.
 
-*   `__init__(self)`
-*   `async review(self, facts, readme: str) -> dict`
-    *   Check the README against the facts; return `{'approved': bool, 'issues': [...]}`.
+*   **`__init__(self)`**:
+    Initializes the `ReviewerAgent`.
+
+*   **`async review(self, facts, readme: str) -> dict`**:
+    Check the README against the facts; return `{'approved': bool, 'issues': [...]}`.
+
+#### Function `_parse_verdict(text: str) -> dict`
+
+Pull the JSON verdict out of the reply, tolerating ```json code fences.
 
 ### `doc_agent.agents.writer`
 
-Writer agent (LLM-driven): turns extracted facts into a README.
-
-#### `class WriterAgent`
+#### Class `WriterAgent`
 
 An LLM agent that writes and revises READMEs from extracted facts.
 
-*   `__init__(self)`
-*   `async write(self, facts) -> str`
-    *   Write a README from scratch using the facts.
-*   `async revise(self, facts, draft: str, issues: list[str]) -> str`
-    *   Rewrite the README, fixing the issues the reviewer raised.
+*   **`__init__(self)`**:
+    Initializes the `WriterAgent`.
+
+*   **`async write(self, facts) -> str`**:
+    Write a README from scratch using the facts.
+
+*   **`async revise(self, facts, draft: str, issues: list[str]) -> str`**:
+    Rewrite the README, fixing the issues the reviewer raised.
+
+#### Function `_facts_block(facts)`
+
+Render the extracted facts as a prompt block.
 
 ### `doc_agent.api.app`
 
-API layer: exposes the documentation and codebase-QA pipelines over HTTP (FastAPI).
+#### Class `GenerateRequest`
 
-*   `@app.get('/health')`
-    *   `health()`
-*   `@app.post('/generate-readme')`
-    *   `async generate_readme_endpoint(req: GenerateRequest)`
-*   `@app.post('/ask')`
-    *   `async ask_endpoint(req: AskRequest)`
+(Inherits from `BaseModel`)
 
-#### `class AskRequest(BaseModel)`
+#### Class `AskRequest`
 
-#### `class GenerateRequest(BaseModel)`
+(Inherits from `BaseModel`)
+
+#### Function `health()`
+
+Endpoint for health checks.
+
+#### Function `async generate_readme_endpoint(req: GenerateRequest) -> None`
+
+Endpoint to generate a README for a project.
+
+#### Function `async ask_endpoint(req: AskRequest) -> None`
+
+Endpoint to ask questions about a project.
 
 ### `doc_agent.core.llm`
 
-Model layer: the single place that connects to Gemini.
+#### Function `build_agent(instructions: str, name: str)`
 
-*   `build_agent(instructions: str, name: str)`
-    *   Build a Gemini-backed chat agent with the given instructions and name.
-*   `embed_texts(texts: list[str]) -> list[list[float]]`
-    *   Return an embedding vector for each input text (used for RAG retrieval).
+Build a Gemini-backed chat agent with the given instructions and name.
+
+#### Function `embed_texts(texts: list[str]) -> list[list[float]]`
+
+Return an embedding vector for each input text (used for RAG retrieval).
+
+#### Function `async run_agent(agent, prompt: str, max_retries: int = 5, base_delay: float = 1.0) -> None`
+
+Run the provided agent with `prompt` and return the reply text. Retries transient failures (e.g. 503/unavailable) with exponential backoff. Normalizes different agent return types by extracting `text` when available, otherwise falling back to `str(result)`.
 
 ### `doc_agent.rag.indexer`
 
-Codebase index (RAG retrieval).
-
-#### `class CodebaseIndex`
+#### Class `CodebaseIndex`
 
 A FAISS vector index over a codebase's extracted facts.
 
-*   `__init__(self, facts: list[dict])`
-*   `search(self, query: str, k: int = 4) -> list[dict]`
-    *   Return the `k` chunks most relevant to the query.
+*   **`__init__(self, facts: list[dict])`**:
+    Initializes the `CodebaseIndex` with codebase facts.
+
+*   **`search(self, query: str, k: int = 4) -> list[dict]`**:
+    Return the k chunks most relevant to the query.
+
+#### Function `_facts_to_chunks(facts: list[dict]) -> list[dict]`
+
+Turn extracted facts into one searchable text chunk per function/class.
 
 ### `doc_agent.tools.extractor`
 
-Scan-and-extract tool for the documentation agent.
+#### Function `_format_arguments(args: ast.arguments) -> str`
 
-*   `extract_from_source(source: str, filename: str = '<unknown>') -> dict`
-    *   Parse a string of Python source and return its documented structure.
-*   `extract_from_file(path) -> dict`
-    *   Read a single `.py` file from disk and extract its structure.
-*   `extract_from_directory(path) -> list[dict]`
-    *   Walk a directory tree and extract every `.py` file inside it.
+Turn a function's argument node into a readable parameter string.
+
+#### Function `_describe_function(node)`
+
+Extract the documentable facts from a single function node.
+
+#### Function `_describe_class(node: ast.ClassDef) -> dict`
+
+Extract the documentable facts from a class node.
+
+#### Function `_extract_imports(tree: ast.Module) -> list[str]`
+
+Collect the NON-standard-library modules this file imports, as dotted names.
+
+#### Function `extract_from_source(source: str, filename: str = '<unknown>') -> dict`
+
+Parse a string of Python source and return its documented structure.
+
+#### Function `extract_from_file(path)`
+
+Read a single .py file from disk and extract its structure.
+
+#### Function `extract_from_directory(path) -> list[dict]`
+
+Walk a directory tree and extract every .py file inside it.
 
 ### `doc_agent.tools.output`
 
-Output tool: writes generated documentation to disk.
+#### Function `strip_code_fence(text: str) -> str`
 
-*   `save_markdown(path, content: str) -> str`
-    *   Save markdown content to a `.md` file; return the absolute path written.
-*   `save_json(path, data) -> str`
-    *   Save a dict/list as pretty-printed JSON; return the absolute path written.
+Remove a wrapping ```...``` fence the model sometimes adds.
+
+#### Function `to_json(data)`
+
+Serialize extracted facts to a JSON string.
+
+#### Function `to_yaml(data)`
+
+Serialize extracted facts to a YAML string (spec/config-style docs).
+
+#### Function `markdown_to_html(text: str) -> str`
+
+Convert a markdown document into a standalone HTML page.
+
+#### Function `save_text(path, content: str) -> str`
+
+Write any text content to a file; return the absolute path written.
+
+#### Function `save_json(path, data)`
+
+Save a dict/list as pretty-printed JSON; return the absolute path written.
+
+#### Function `render_architecture_mermaid(model: dict) -> str`
+
+Deterministically render an architecture model (components, externals, edges) into a clean Mermaid flowchart.
 
 ### `doc_agent.workflow.pipeline`
 
-The documentation pipeline: orchestration.
+#### Class `DocumentationPipeline`
 
-#### `class DocumentationPipeline`
+Generates documentation in a chosen format from a codebase.
 
-Runs the full extract -> write -> review -> revise loop.
+*   **`__init__(self, max_rounds: int = 2)`**:
+    Initializes the `DocumentationPipeline`.
 
-*   `__init__(self, max_rounds: int = 2)`
-*   `async run(self, project_path, output_path = None) -> dict`
+*   **`async _write_reviewed_markdown(self, facts)`**:
+    Run the writer + maker-checker loop; return (`markdown`, `review_trace`).
+
+*   **`async run(self, project_path, fmt: str = 'md', output_path = None) -> dict`**:
+    Runs the documentation generation process for a given project path and format.
 
 ### `doc_agent.workflow.qa`
 
-The codebase-QA pipeline: RAG orchestration.
-
-#### `class CodebaseQA`
+#### Class `CodebaseQA`
 
 Builds a RAG index over a codebase, then answers questions about it.
 
-*   `__init__(self, project_path)`
-*   `async ask(self, question: str, k: int = 4) -> dict`
+*   **`__init__(self, project_path)`**:
+    Initializes the `CodebaseQA` with the path to the codebase.
+
+*   **`async ask(self, question: str, k: int = 4) -> dict`**:
+    Asks a question about the codebase using the RAG index.

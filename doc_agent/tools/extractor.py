@@ -9,6 +9,7 @@ No LLM is involved here -- this is pure, deterministic parsing.
 
 import ast
 from pathlib import Path
+import sys
 
 
 def _format_arguments(args: ast.arguments) -> str:
@@ -106,6 +107,38 @@ def _describe_class(node: ast.ClassDef) -> dict:
         "lineno": node.lineno,
     }
 
+# Standard-library module names, used to filter import noise out of diagrams.
+_STDLIB = set(sys.stdlib_module_names)
+
+
+def _extract_imports(tree: ast.Module) -> list[str]:
+    """
+    Collect the NON-standard-library modules this file imports, as dotted names.
+
+    Standard-library imports (json, os, sys, ast, pathlib, asyncio, ...) are
+    filtered out -- they're pure noise in an architecture diagram. What remains
+    is the project's own modules plus meaningful third-party libraries: the real
+    dependencies worth showing.
+    """
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level  # leading dots for relative imports
+            imports.append(prefix + (node.module or ""))
+    seen, unique = set(), []
+    for imp in imports:
+        top = imp.lstrip(".").split(".")[0]  # top-level package name
+        if not imp or top in _STDLIB:
+            continue  # drop standard-library noise
+        if imp not in seen:
+            seen.add(imp)
+            unique.append(imp)
+    return unique
+
+
 
 def extract_from_source(source: str, filename: str = "<unknown>") -> dict:
     """
@@ -125,6 +158,7 @@ def extract_from_source(source: str, filename: str = "<unknown>") -> dict:
     return {
         "file": filename,
         "module_docstring": ast.get_docstring(tree),
+        "imports": _extract_imports(tree),
         "functions": functions,
         "classes": classes,
     }
