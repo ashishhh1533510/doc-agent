@@ -82,7 +82,14 @@ class DocumentationPipeline:
                     llm_facts, output_path or f"architecture.{fmt}", fmt=fmt
                 )
                 result["saved_to"] = saved
-                result["content"] = f"[image written to {saved}]"
+                if fmt == "svg":
+                    try:
+                        with open(saved, "r", encoding="utf-8") as f:
+                            result["content"] = f.read()
+                    except Exception:
+                        result["content"] = f"[image written to {saved}]"
+                else:
+                    result["content"] = f"[image written to {saved}]"
                 return result
 
             if fmt == "drawio":
@@ -90,7 +97,11 @@ class DocumentationPipeline:
                     llm_facts, output_path or "architecture.svg"
                 )
                 result["saved_to"] = saved
-                result["content"] = f"[editable SVG written to {saved}]"
+                try:
+                    with open(saved, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
+                except Exception:
+                    result["content"] = f"[editable SVG written to {saved}]"
                 return result
 
             if fmt == "dot":
@@ -98,7 +109,11 @@ class DocumentationPipeline:
                     llm_facts, output_path or "architecture.gv"
                 )
                 result["saved_to"] = saved
-                result["content"] = f"[Graphviz DOT source written to {saved}]"
+                try:
+                    with open(saved, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
+                except Exception:
+                    result["content"] = f"[Graphviz DOT source written to {saved}]"
                 return result
 
             if fmt == "drawio_xml":
@@ -106,7 +121,11 @@ class DocumentationPipeline:
                     llm_facts, output_path or "architecture.drawio"
                 )
                 result["saved_to"] = saved
-                result["content"] = f"[draw.io file written to {saved}]"
+                try:
+                    with open(saved, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
+                except Exception:
+                    result["content"] = f"[draw.io file written to {saved}]"
                 return result
 
             # --- structured spec (0 LLM calls) -> FULL facts ---
