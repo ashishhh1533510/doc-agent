@@ -249,6 +249,15 @@
     margin-top: 7px; line-height: 1.5;
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'dark',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true, htmlLabels: true }
+  });
+</script>
 </head>
 <body>
   <header>
@@ -420,14 +429,21 @@
 
       setStatus(res.ok ? "ok" : "err", res.status + " " + res.statusText);
 
+      // Check for backend errors
+      if (res.ok && parsed && parsed.error) {
+        setStatus("err", "error");
+        showResult(parsed.error, null, parsed);
+        return;
+      }
+
       // The API returns the generated file's text in `content` — turn that into a
       // browser download so the user gets the file on their own machine (the copy
       // saved on the server is ephemeral and not reachable over the web).
       let download = null;
       if (res.ok && parsed && typeof parsed.content === "string") {
-        download = { filename: downloadName(parsed), text: parsed.content };
+        download = { filename: downloadName(parsed), text: parsed.content, isBase64: !!parsed.is_base64 };
       }
-      showResult(pretty, download);
+      showResult(pretty, download, parsed);
     } catch (err) {
       clearInterval(ticker);
       $("timing").textContent = "";
@@ -449,17 +465,81 @@
     el.className = "status-pill" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
     el.textContent = text;
   }
-  function showResult(text, download) {
+  function showResult(text, download, parsed) {
     const dl = $("download");
-    if (download) {
-      // Generation succeeded — show a clean confirmation, not the raw JSON.
-      $("result-container").innerHTML =
-        '<div class="ready"><div class="ready-name"></div>'
-        + '<div class="ready-sub">Click download to save it to your device.</div></div>';
-      $("result-container").querySelector(".ready-name").textContent = "✓ " + download.filename + " ready";
+    if (download && parsed) {
       dl.style.display = "inline-block";
       dl.textContent = "↓ " + download.filename;
-      dl.onclick = () => triggerDownload(download.filename, download.text);
+      dl.onclick = () => triggerDownload(download.filename, download.text, download.isBase64);
+
+      const fmt = parsed.format;
+      const content = parsed.content;
+      const container = $("result-container");
+
+      if (fmt === "mermaid") {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ Mermaid diagram ready</div>
+            <div class="ready-sub">Click download to save the <code>.mmd</code> file, or view the rendered diagram below.</div>
+          </div>
+          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: auto; display: flex; justify-content: center;">
+            <pre class="mermaid" style="background:transparent; border:none; padding:0; margin:0;">${content}</pre>
+          </div>
+        `;
+        try {
+          mermaid.run();
+        } catch (e) {
+          console.error("Mermaid render failed:", e);
+        }
+      } else if (fmt === "png") {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ Technical Architecture Image ready</div>
+            <div class="ready-sub">Click download to save the <code>.png</code> file, or view it below.</div>
+          </div>
+          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; text-align: center;">
+            <img src="data:image/png;base64,${content}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);" />
+          </div>
+        `;
+      } else if (fmt === "svg" || fmt === "drawio") {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ SVG Diagram ready</div>
+            <div class="ready-sub">Click download to save the <code>.svg</code> file, or view it below.</div>
+          </div>
+          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: auto; display: flex; justify-content: center;">
+            <div class="svg-inline-container" style="width: 100%; text-align: center;">${content}</div>
+          </div>
+        `;
+        const svgEl = container.querySelector(".svg-inline-container svg");
+        if (svgEl) {
+          svgEl.style.maxWidth = "100%";
+          svgEl.style.height = "auto";
+        }
+      } else if (fmt === "dot") {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ Graphviz DOT source ready</div>
+            <div class="ready-sub">Click download to save the <code>.dot</code> file, or view the source below.</div>
+          </div>
+          <pre class="result" style="margin-top: 20px;">${content}</pre>
+        `;
+      } else if (fmt === "drawio_xml") {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ Draw.io XML ready</div>
+            <div class="ready-sub">Click download to save the <code>.drawio</code> file, then open it in <a href="https://app.diagrams.net/" target="_blank" style="color:var(--accent); text-decoration:underline;">draw.io</a>.</div>
+          </div>
+          <pre class="result" style="margin-top: 20px; max-height: 250px;">${content}</pre>
+        `;
+      } else {
+        container.innerHTML = `
+          <div class="ready">
+            <div class="ready-name">✓ ${download.filename} ready</div>
+            <div class="ready-sub">Click download to save it to your device.</div>
+          </div>
+        `;
+      }
     } else {
       // Q&A answer or an error — show the text so it stays useful.
       $("result-container").innerHTML = '<pre class="result"></pre>';
@@ -480,8 +560,19 @@
     return ACTIONS[$("action").value].out || "download.txt";
   }
 
-  function triggerDownload(filename, text) {
-    const blob = new Blob([text], { type: "application/octet-stream" });
+  function triggerDownload(filename, text, isBase64) {
+    let blob;
+    if (isBase64) {
+      const byteCharacters = atob(text);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      blob = new Blob([byteArray], { type: "application/octet-stream" });
+    } else {
+      blob = new Blob([text], { type: "application/octet-stream" });
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
