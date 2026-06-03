@@ -1,0 +1,15 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.drawio
+*.png
+*.svg
+*.dot
+*.mmd
+openapi.json
+.pytest_cache/
+.DS_Store

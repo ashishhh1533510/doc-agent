@@ -10,31 +10,23 @@ drawio_xml  -> native draw.io file (rank-based layout, opens directly)
 
 All text formats are written as plain text. Deterministic -- no LLM here.
 """
-
+import os, platform
 import json
 from pathlib import Path
 
 import markdown as _markdown
 import yaml
-
-import os
 import shutil
 
 
 # Ensure Graphviz's `dot` is findable even when the server process didn't
 # inherit the user PATH. Point the graphviz library straight at the binary.
 def _ensure_graphviz_on_path():
-    if shutil.which("dot"):
-        return  # already findable, nothing to do
-    # common install locations on this machine
-    candidates = [
-        r"C:\Users\AshishKumar\Downloads\Graphviz-15.0.0-win64\bin",
-        r"C:\Program Files\Graphviz\bin",
-    ]
-    for d in candidates:
-        if os.path.isfile(os.path.join(d, "dot.exe")):
-            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-            return
+    if platform.system() != "Windows":
+        return  # Linux/Render: graphviz installed via apt, already on PATH
+    graphviz_bin = r"C:\Users\AshishKumar\Downloads\Graphviz-15.0.0-win64\bin"
+    if os.path.isdir(graphviz_bin) and graphviz_bin not in os.environ["PATH"]:
+        os.environ["PATH"] = graphviz_bin + os.pathsep + os.environ["PATH"]
 
 
 _ensure_graphviz_on_path()
