@@ -201,6 +201,10 @@
     padding: 5px 10px; border-radius: 6px; cursor: pointer;
   }
   .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  .out-actions { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
+  .out-actions .copy-btn { margin-left: 0; }
+  .dl-btn { color: var(--accent); border-color: rgba(224,168,46,0.45); }
+  .dl-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
   pre.result {
     background: var(--panel);
@@ -301,7 +305,10 @@
       <div class="out-head">
         <span class="status-pill" id="status">idle</span>
         <span class="timing" id="timing"></span>
-        <button class="copy-btn" id="copy" style="display:none">copy</button>
+        <span class="out-actions">
+          <button class="copy-btn dl-btn" id="download" style="display:none">↓ download</button>
+          <button class="copy-btn" id="copy" style="display:none">copy</button>
+        </span>
       </div>
       <div class="req-line" id="reqline"></div>
       <div id="result-container">
@@ -376,6 +383,7 @@
     $("reqline").innerHTML = `<span class="verb">POST</span> ${url}`;
     setStatus("running", "running…");
     $("copy").style.display = "none";
+    $("download").style.display = "none";
     $("run").disabled = true;
     $("run").innerHTML = '<span class="spinner"></span>working';
     $("result-container").innerHTML = '<div class="empty">Waiting for the server…</div>';
@@ -391,11 +399,19 @@
       $("timing").textContent = ms + " ms";
 
       const raw = await res.text();
-      let pretty = raw;
-      try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) {}
+      let parsed = null, pretty = raw;
+      try { parsed = JSON.parse(raw); pretty = JSON.stringify(parsed, null, 2); } catch (_) {}
 
       setStatus(res.ok ? "ok" : "err", res.status + " " + res.statusText);
-      showResult(pretty);
+
+      // The API returns the generated file's text in `content` — turn that into a
+      // browser download so the user gets the file on their own machine (the copy
+      // saved on the server is ephemeral and not reachable over the web).
+      let download = null;
+      if (res.ok && parsed && typeof parsed.content === "string") {
+        download = { filename: downloadName(parsed), text: parsed.content };
+      }
+      showResult(pretty, download);
     } catch (err) {
       $("timing").textContent = "";
       setStatus("err", "network error");
@@ -416,9 +432,10 @@
     el.className = "status-pill" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
     el.textContent = text;
   }
-  function showResult(text) {
+  function showResult(text, download) {
     $("result-container").innerHTML = '<pre class="result"></pre>';
     $("result-container").querySelector("pre").textContent = text;
+
     const copy = $("copy");
     copy.style.display = "inline-block";
     copy.onclick = () => {
@@ -426,6 +443,39 @@
       copy.textContent = "copied";
       setTimeout(() => copy.textContent = "copy", 1200);
     };
+
+    const dl = $("download");
+    if (download) {
+      dl.style.display = "inline-block";
+      dl.textContent = "↓ " + download.filename;
+      dl.onclick = () => triggerDownload(download.filename, download.text);
+    } else {
+      dl.style.display = "none";
+    }
+  }
+
+  // Derive a filename: prefer the server's saved name, then the user's output field,
+  // then the action's default.
+  function downloadName(parsed) {
+    if (parsed.saved_to) {
+      const base = String(parsed.saved_to).split(/[\\/]/).pop();
+      if (base) return base;
+    }
+    const out = $("output").value.trim();
+    if (out) return out.split(/[\\/]/).pop();
+    return ACTIONS[$("action").value].out || "download.txt";
+  }
+
+  function triggerDownload(filename, text) {
+    const blob = new Blob([text], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
   function flash(kind, text) { setStatus(kind, text); }
 
