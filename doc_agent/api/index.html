@@ -230,6 +230,20 @@
     border: 1px dashed var(--border);
     border-radius: 10px;
   }
+  .ready {
+    padding: 36px 20px;
+    text-align: center;
+    border: 1px solid rgba(94,194,122,0.35);
+    background: rgba(94,194,122,0.06);
+    border-radius: 10px;
+  }
+  .ready-name {
+    font-family: var(--mono); font-size: 15px; font-weight: 600;
+    color: var(--green); margin-bottom: 8px;
+  }
+  .ready-sub {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
   .hint {
     font-family: var(--mono); font-size: 11px; color: var(--muted-2);
     margin-top: 7px; line-height: 1.5;
@@ -307,7 +321,6 @@
         <span class="timing" id="timing"></span>
         <span class="out-actions">
           <button class="copy-btn dl-btn" id="download" style="display:none">↓ download</button>
-          <button class="copy-btn" id="copy" style="display:none">copy</button>
         </span>
       </div>
       <div class="req-line" id="reqline"></div>
@@ -382,21 +395,24 @@
     const url = base + a.path;
     $("reqline").innerHTML = `<span class="verb">POST</span> ${url}`;
     setStatus("running", "running…");
-    $("copy").style.display = "none";
     $("download").style.display = "none";
     $("run").disabled = true;
     $("run").innerHTML = '<span class="spinner"></span>working';
-    $("result-container").innerHTML = '<div class="empty">Waiting for the server…</div>';
+    $("result-container").innerHTML = '<div class="empty">Working… md and html take a few seconds (multiple AI calls); a sleeping server can take 30–60s to wake.</div>';
 
     const t0 = performance.now();
+    const ticker = setInterval(() => {
+      $("timing").textContent = ((performance.now() - t0) / 1000).toFixed(1) + " s";
+    }, 100);
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      clearInterval(ticker);
       const ms = Math.round(performance.now() - t0);
-      $("timing").textContent = ms + " ms";
+      $("timing").textContent = (ms / 1000).toFixed(1) + " s";
 
       const raw = await res.text();
       let parsed = null, pretty = raw;
@@ -413,6 +429,7 @@
       }
       showResult(pretty, download);
     } catch (err) {
+      clearInterval(ticker);
       $("timing").textContent = "";
       setStatus("err", "network error");
       showResult(
@@ -433,23 +450,20 @@
     el.textContent = text;
   }
   function showResult(text, download) {
-    $("result-container").innerHTML = '<pre class="result"></pre>';
-    $("result-container").querySelector("pre").textContent = text;
-
-    const copy = $("copy");
-    copy.style.display = "inline-block";
-    copy.onclick = () => {
-      navigator.clipboard.writeText(text);
-      copy.textContent = "copied";
-      setTimeout(() => copy.textContent = "copy", 1200);
-    };
-
     const dl = $("download");
     if (download) {
+      // Generation succeeded — show a clean confirmation, not the raw JSON.
+      $("result-container").innerHTML =
+        '<div class="ready"><div class="ready-name"></div>'
+        + '<div class="ready-sub">Click download to save it to your device.</div></div>';
+      $("result-container").querySelector(".ready-name").textContent = "✓ " + download.filename + " ready";
       dl.style.display = "inline-block";
       dl.textContent = "↓ " + download.filename;
       dl.onclick = () => triggerDownload(download.filename, download.text);
     } else {
+      // Q&A answer or an error — show the text so it stays useful.
+      $("result-container").innerHTML = '<pre class="result"></pre>';
+      $("result-container").querySelector("pre").textContent = text;
       dl.style.display = "none";
     }
   }
