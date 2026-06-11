@@ -1,35 +1,17 @@
 """
 Output tool: render generated documentation into different formats and save it.
 
-md / html  -> prose (html is converted from markdown)
+md / html   -> prose (html is converted from markdown)
 json / yaml -> the extracted facts as a structured spec
-mermaid     -> diagram text (produced by the diagrammer agent, saved as-is)
-png / svg   -> architecture image (diagrams library)
-dot         -> raw Graphviz DOT source
-drawio_xml  -> native draw.io file (rank-based layout, opens directly)
+mermaid     -> C4 combined HLD + LLD diagram text (saved as-is)
 
 All text formats are written as plain text. Deterministic -- no LLM here.
 """
-import os, platform
 import json
 from pathlib import Path
 
 import markdown as _markdown
 import yaml
-import shutil
-
-
-# Ensure Graphviz's `dot` is findable even when the server process didn't
-# inherit the user PATH. Point the graphviz library straight at the binary.
-def _ensure_graphviz_on_path():
-    if platform.system() != "Windows":
-        return  # Linux/Render: graphviz installed via apt, already on PATH
-    graphviz_bin = r"C:\Users\AshishKumar\Downloads\Graphviz-15.0.0-win64\bin"
-    if os.path.isdir(graphviz_bin) and graphviz_bin not in os.environ["PATH"]:
-        os.environ["PATH"] = graphviz_bin + os.pathsep + os.environ["PATH"]
-
-
-_ensure_graphviz_on_path()
 
 
 def strip_code_fence(text: str) -> str:
@@ -86,374 +68,6 @@ def save_text(path, content: str) -> str:
 def save_json(path, data) -> str:
     """Save a dict/list as pretty-printed JSON; return the absolute path written."""
     return save_text(path, to_json(data))
-
-
-def render_architecture_mermaid(model: dict) -> str:
-    """
-    Deterministically render an architecture model (components, externals, edges)
-    into a clean Mermaid flowchart.
-
-    The LLM decides WHAT the architecture is (this dict); this function decides
-    HOW to draw it correctly: it groups components into layer subgraphs, adds
-    external-system nodes, and draws edges while DROPPING self-loops, removing
-    duplicate edges, and ignoring edges that point at unknown nodes. That keeps
-    the diagram structurally valid no matter how the model is phrased.
-    """
-    components = model.get("components", [])
-    externals = model.get("externals", [])
-    edges = model.get("edges", [])
-
-    valid_ids = {c["id"] for c in components} | {e["id"] for e in externals}
-    lines = ["flowchart TB"]
-
-    # Group components into one subgraph per layer (unique, safe subgraph ids).
-    layers = {}
-    for c in components:
-        layers.setdefault(c.get("layer", "Components"), []).append(c)
-    for i, (layer, comps) in enumerate(layers.items()):
-        lines.append(f'    subgraph sg{i}["{layer.replace(chr(34), chr(39))}"]')
-        for c in comps:
-            lines.append(f'        {c["id"]}["{c["label"].replace(chr(34), chr(39))}"]')
-        lines.append("    end")
-
-    # External systems as rounded/stadium nodes, outside any subgraph.
-    for ext in externals:
-        lines.append(f'    {ext["id"]}(["{ext["label"].replace(chr(34), chr(39))}"])')
-
-    # Edges: drop self-loops, duplicates, and references to unknown nodes.
-    seen = set()
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
-            continue                       # no self-loops, no incomplete edges
-        if src not in valid_ids or dst not in valid_ids:
-            continue                       # no edges to undefined nodes
-        if (src, dst) in seen:
-            continue                       # no duplicate edges between a pair
-        seen.add((src, dst))
-        label = str(e.get("label", "")).replace("|", "/").strip()
-        lines.append(f"    {src} -->|{label}| {dst}" if label else f"    {src} --> {dst}")
-
-    return "\n".join(lines)
-
-
-def render_architecture_diagram(model: dict, output_path, fmt: str = "png",
-                                title: str = "Architecture", direction: str = "TB") -> str:
-    """
-    Deterministically render an architecture model into an IMAGE (png/svg) using
-    the `diagrams` library, which drives Graphviz under the hood.
-
-    Same model and same contract as render_architecture_mermaid(): the LLM decides
-    WHAT (the model dict), this code decides HOW. Components are grouped into one
-    Cluster per layer, externals get system icons, and edges are validated the same
-    way -- self-loops, duplicates, and edges to unknown nodes are dropped.
-
-    Requires the Graphviz `dot` binary to be installed and on PATH.
-    Returns the path to the image file written.
-    """
-    from diagrams import Diagram, Cluster, Edge
-    from diagrams.programming.language import Python
-    from diagrams.programming.framework import Fastapi
-    from diagrams.generic.storage import Storage
-    from diagrams.generic.compute import Rack
-    from diagrams.generic.blank import Blank
-
-    components = model.get("components", []) or []
-    externals = model.get("externals", []) or []
-    edges = model.get("edges", []) or []
-
-    # Same validation as the mermaid renderer.
-    valid_ids = {c["id"] for c in components} | {e["id"] for e in externals}
-    seen = set()
-    clean_edges = []
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
-            continue
-        if src not in valid_ids or dst not in valid_ids:
-            continue
-        if (src, dst) in seen:
-            continue
-        seen.add((src, dst))
-        clean_edges.append(e)
-
-    # `diagrams` appends the format extension itself, so strip it from the name.
-    base = str(Path(output_path).with_suffix(""))
-
-    def _icon_for_external(label: str):
-        low = label.lower()
-        if any(k in low for k in ("faiss", "vector", "store", "db")):
-            return Storage
-        if "fastapi" in low:
-            return Fastapi
-        if any(k in low for k in ("api", "llm", "gemini")):
-            return Rack
-        return Blank
-
-    graph_attr = {
-        "fontsize": "20",
-        "bgcolor": "white",
-        "splines": "ortho",
-        "nodesep": "0.6",
-        "ranksep": "1.0",
-    }
-
-    with Diagram(title, filename=base, outformat=fmt, show=False,
-                 direction=direction, graph_attr=graph_attr):
-        nodes = {}
-
-        # One Cluster per layer, insertion order preserved.
-        layers = {}
-        for c in components:
-            layers.setdefault(c.get("layer", "Components"), []).append(c)
-        for layer_name, comps in layers.items():
-            with Cluster(layer_name):
-                for c in comps:
-                    nodes[c["id"]] = Python(c["label"])
-
-        if externals:
-            with Cluster("External Systems"):
-                for x in externals:
-                    nodes[x["id"]] = _icon_for_external(x["label"])(x["label"])
-
-        for e in clean_edges:
-            nodes[e["from"]] >> Edge(label=str(e.get("label", ""))) >> nodes[e["to"]]
-
-    return f"{base}.{fmt}"
-
-
-def render_typed_architecture(model: dict, output_path, fmt: str = "png",
-                              title: str = "Architecture", direction: str = "TB") -> str:
-    """
-    Render a TYPED architecture model into a semantic-shape image (png/svg) via
-    the `diagrams` library (Graphviz under the hood).
-
-    Each node carries a `type` that maps to a distinct shape:
-      actor     -> user/person icon (the entry actor)
-      framework -> web framework icon
-      process   -> compute/logic block
-      datastore -> database/file store
-      external  -> external API block
-      io        -> input/output artifact
-
-    The LLM decides WHAT and WHAT-KIND (the model); this code decides WHICH SHAPE.
-    Edges are validated like the other renderers: self-loops, duplicates, and edges
-    to unknown nodes are dropped. Requires Graphviz `dot` on PATH.
-    Returns the path to the image written.
-    """
-    from diagrams import Diagram, Cluster, Edge
-    from diagrams.onprem.client import User
-    from diagrams.generic.database import SQL
-    from diagrams.generic.storage import Storage
-    from diagrams.generic.compute import Rack
-    from diagrams.programming.language import Python
-    from diagrams.programming.framework import Fastapi
-
-    shapes = {
-        "actor": User, "datastore": SQL, "external": Rack,
-        "framework": Fastapi, "process": Python, "io": Storage,
-    }
-    default = Python
-
-    nodes_in = model.get("nodes", []) or []
-    edges = model.get("edges", []) or []
-    valid = {n["id"] for n in nodes_in}
-
-    seen = set()
-    clean = []
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
-            continue
-        if src not in valid or dst not in valid:
-            continue
-        if (src, dst) in seen:
-            continue
-        seen.add((src, dst))
-        clean.append(e)
-
-    base = str(Path(output_path).with_suffix(""))
-    graph_attr = {
-        "fontsize": "22", "bgcolor": "white", "splines": "ortho",
-        "nodesep": "1.2", "ranksep": "1.3", "pad": "0.5", "compound": "true",
-    }
-    node_attr = {"fontsize": "13"}
-
-    with Diagram(title, filename=base, outformat=fmt, show=False,
-                 direction=direction, graph_attr=graph_attr, node_attr=node_attr):
-        objs = {}
-        groups = {}
-        for n in nodes_in:
-            groups.setdefault(n.get("group"), []).append(n)
-        for group_name, members in groups.items():
-            if group_name:
-                with Cluster(group_name):
-                    for n in members:
-                        objs[n["id"]] = shapes.get(n.get("type"), default)(n["label"])
-            else:
-                for n in members:
-                    objs[n["id"]] = shapes.get(n.get("type"), default)(n["label"])
-        for e in clean:
-            objs[e["from"]] >> Edge(label=str(e.get("label", ""))) >> objs[e["to"]]
-
-    return f"{base}.{fmt}"
-
-
-def render_typed_architecture_svg(model: dict, output_path, title: str = "Architecture") -> str:
-    """
-    Render a typed architecture model into a fully-editable SVG using pure
-    Graphviz shapes -- no embedded images. Every shape imports into draw.io
-    and Visio as a native editable element.
-
-    Node types map to distinct shapes and colors:
-      actor     -> circle  (blue)       -- the entry actor
-      framework -> rounded rectangle (green) -- web framework
-      process   -> rectangle (yellow)   -- application logic
-      datastore -> cylinder (red)       -- storage / vector store
-      external  -> dashed rectangle (purple) -- external API
-      io        -> note shape (grey)    -- input/output artifact
-
-    Returns the path to the SVG written.
-    """
-    import graphviz
-
-    nodes_in = model.get("nodes", []) or []
-    edges = model.get("edges", []) or []
-    valid = {n["id"] for n in nodes_in}
-
-    seen = set()
-    clean = []
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
-            continue
-        if src not in valid or dst not in valid:
-            continue
-        if (src, dst) in seen:
-            continue
-        seen.add((src, dst))
-        clean.append(e)
-
-    STYLE = {
-        "actor":     {"shape": "circle",    "style": "filled",         "fillcolor": "#DAE8FC", "color": "#6C8EBF"},
-        "framework": {"shape": "rectangle", "style": "filled,rounded", "fillcolor": "#D5E8D4", "color": "#82B366"},
-        "process":   {"shape": "rectangle", "style": "filled",         "fillcolor": "#FFF2CC", "color": "#D6B656"},
-        "datastore": {"shape": "cylinder",  "style": "filled",         "fillcolor": "#F8CECC", "color": "#B85450"},
-        "external":  {"shape": "rectangle", "style": "filled,dashed",  "fillcolor": "#E1D5E7", "color": "#9673A6"},
-        "io":        {"shape": "note",      "style": "filled",         "fillcolor": "#F5F5F5", "color": "#666666"},
-    }
-    default_style = STYLE["process"]
-
-    dot = graphviz.Digraph(
-        comment=title,
-        graph_attr={
-            "rankdir": "TB", "splines": "polyline", "nodesep": "0.9",
-            "ranksep": "1.2", "fontname": "Arial", "label": title,
-            "labelloc": "b", "fontsize": "22", "bgcolor": "white",
-            "compound": "true", "pad": "0.5",
-        },
-        node_attr={"fontname": "Arial", "fontsize": "13"},
-        edge_attr={"fontname": "Arial", "fontsize": "11"},
-    )
-
-    groups = {}
-    for n in nodes_in:
-        groups.setdefault(n.get("group"), []).append(n)
-
-    for group_name, members in groups.items():
-        if group_name:
-            with dot.subgraph(name=f"cluster_{group_name.replace(' ', '_')}") as sub:
-                sub.attr(label=group_name, style="filled,rounded",
-                         fillcolor="#EEF4FF", color="#AAAAAA",
-                         fontname="Arial", fontsize="14", margin="20")
-                for n in members:
-                    sub.node(n["id"], label=n["label"],
-                             **STYLE.get(n.get("type"), default_style))
-        else:
-            for n in members:
-                dot.node(n["id"], label=n["label"],
-                         **STYLE.get(n.get("type"), default_style))
-
-    for e in clean:
-        dot.edge(e["from"], e["to"], xlabel=str(e.get("label", "")))
-
-    base = str(Path(output_path).with_suffix(""))
-    dot.render(base, format="svg", cleanup=True)
-    return f"{base}.svg"
-
-
-def render_typed_architecture_dot(model: dict, output_path, title: str = "Architecture") -> str:
-    """
-    Export the typed architecture model as raw Graphviz DOT source (.gv file).
-    No rendering -- pure text. Import into draw.io via:
-      Extras -> Edit Diagram -> switch to Graphviz tab -> paste.
-    Also opens directly in VS Code with the Graphviz extension.
-    Returns the path to the .gv file written.
-    """
-    import graphviz
-
-    nodes_in = model.get("nodes", []) or []
-    edges = model.get("edges", []) or []
-    valid = {n["id"] for n in nodes_in}
-
-    seen = set()
-    clean = []
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
-            continue
-        if src not in valid or dst not in valid:
-            continue
-        if (src, dst) in seen:
-            continue
-        seen.add((src, dst))
-        clean.append(e)
-
-    STYLE = {
-        "actor":     {"shape": "circle",    "style": "filled",         "fillcolor": "#DAE8FC", "color": "#6C8EBF"},
-        "framework": {"shape": "rectangle", "style": "filled,rounded", "fillcolor": "#D5E8D4", "color": "#82B366"},
-        "process":   {"shape": "rectangle", "style": "filled",         "fillcolor": "#FFF2CC", "color": "#D6B656"},
-        "datastore": {"shape": "cylinder",  "style": "filled",         "fillcolor": "#F8CECC", "color": "#B85450"},
-        "external":  {"shape": "rectangle", "style": "filled,dashed",  "fillcolor": "#E1D5E7", "color": "#9673A6"},
-        "io":        {"shape": "note",      "style": "filled",         "fillcolor": "#F5F5F5", "color": "#666666"},
-    }
-
-    dot = graphviz.Digraph(
-        comment=title,
-        graph_attr={
-            "rankdir": "TB", "splines": "polyline", "nodesep": "0.9",
-            "ranksep": "1.2", "fontname": "Arial", "label": title,
-            "labelloc": "b", "fontsize": "22", "bgcolor": "white",
-            "compound": "true", "pad": "0.5",
-        },
-        node_attr={"fontname": "Arial", "fontsize": "13"},
-        edge_attr={"fontname": "Arial", "fontsize": "11"},
-    )
-
-    groups = {}
-    for n in nodes_in:
-        groups.setdefault(n.get("group"), []).append(n)
-
-    for group_name, members in groups.items():
-        if group_name:
-            with dot.subgraph(name=f"cluster_{group_name.replace(' ', '_')}") as sub:
-                sub.attr(label=group_name, style="filled,rounded",
-                         fillcolor="#EEF4FF", color="#AAAAAA",
-                         fontname="Arial", fontsize="14", margin="20")
-                for n in members:
-                    sub.node(n["id"], label=n["label"],
-                             **STYLE.get(n.get("type"), STYLE["process"]))
-        else:
-            for n in members:
-                dot.node(n["id"], label=n["label"],
-                         **STYLE.get(n.get("type"), STYLE["process"]))
-
-    for e in clean:
-        dot.edge(e["from"], e["to"], xlabel=str(e.get("label", "")))
-
-    path = Path(output_path).with_suffix(".gv")
-    path.write_text(dot.source, encoding="utf-8")
-    return str(path)
 
 
 def slim_facts_for_llm(facts: list, max_tokens: int = 100_000) -> list:
@@ -520,172 +134,253 @@ def slim_facts_for_llm(facts: list, max_tokens: int = 100_000) -> list:
     return payload
 
 
-def _layout_from_intent(model: dict):
-    """Compute exact node coordinates from the LLM's layout intent.
+def render_c4_combined(model: dict) -> str:
+    """Render HLD as a flowchart TD with a named system boundary subgraph.
 
-    The LLM assigns each node a `rank` (integer band, 0 = first) and a flow
-    `direction`. This function turns that intent into clean coordinates: each
-    rank becomes an evenly-spaced, centered row (TB) or column (LR). Because the
-    code owns every coordinate, overlaps are impossible by construction.
+    Visual hierarchy:
+      Actor(s)
+          ↓
+      [system_purpose boundary]
+          capabilities inside
+          ↓
+      External systems (outside, below)
     """
-    from collections import defaultdict
+    ctx  = model.get("context", {})
+    cont = model.get("containers", {})
 
-    direction = model.get("direction", "TB")
-    nodes = model.get("nodes", []) or []
+    # Prefer containers.system_label (set to system_purpose by updated architect).
+    # Fall back to context.system_name for backward compatibility.
+    system_label = (
+        cont.get("system_label")
+        or ctx.get("system_name")
+        or "System"
+    )
 
-    NODE_W, NODE_H = 200, 70
-    H_GAP, V_GAP = 140, 200   # wide gaps give edges their own routing lanes
+    lines = ["flowchart TD"]
 
-    ranks = defaultdict(list)
-    for n in nodes:
-        ranks[n.get("rank", 0)].append(n)
-    sorted_ranks = sorted(ranks.keys())
+    # ── Actors ──────────────────────────────────────────────────────────────
+    actor_ids = []
+    for a in ctx.get("actors", []):
+        aid = _slug(a["id"])
+        actor_ids.append(aid)
+        lines.append(f'    {aid}["{a["label"]}"]')
 
-    max_in_rank = max((len(ranks[r]) for r in sorted_ranks), default=1)
-    canvas_w = max_in_rank * NODE_W + (max_in_rank - 1) * H_GAP
+    lines.append("")
 
-    pos = {}
-    for band, r in enumerate(sorted_ranks):
-        row = ranks[r]
-        row_w = len(row) * NODE_W + (len(row) - 1) * H_GAP
-        start = (canvas_w - row_w) / 2
-        for i, n in enumerate(row):
-            if direction == "LR":
-                x = band * (NODE_W + H_GAP)
-                y = start + i * (NODE_H + H_GAP)
-            else:  # TB
-                x = start + i * (NODE_W + H_GAP)
-                y = band * (NODE_H + V_GAP)
-            pos[n["id"]] = {"x": x, "y": y, "w": NODE_W, "h": NODE_H}
-    return pos
+    # ── System boundary (subgraph) with capabilities inside ─────────────────
+    safe_label = system_label.replace('"', "'")
+    lines.append(f'    subgraph SYS["{safe_label}"]')
 
+    cap_ids = []
+    for c in cont.get("containers", []):
+        cid = _slug(c["id"])
+        cap_ids.append(cid)
+        tech = c.get("tech", "")
+        label = c["label"] + (f"<br/><small>{tech}</small>" if tech else "")
+        lines.append(f'        {cid}["{label}"]')
 
-def render_drawio_xml(model: dict, output_path, title: str = "Architecture") -> str:
-    """
-    Generate a native draw.io XML file (.drawio) from a typed architecture model
-    that includes the LLM's layout intent (per-node `rank` + `direction`).
+    for db in cont.get("databases", []):
+        did = _slug(db["id"])
+        cap_ids.append(did)
+        lines.append(f'        {did}[("{db["label"]}")]')
 
-    The LLM decides the structure (which nodes share a rank, grouping, flow
-    direction); this code computes exact, evenly-spaced coordinates from that
-    intent. No Graphviz, no auto-layout, no overlaps. Opens directly in draw.io.
+    lines.append("    end")
+    lines.append("")
 
-    Edge connection points are distributed across each node's perimeter so that
-    multiple edges on the same node don't stack on one point. Returns the path
-    to the .drawio file written.
-    """
-    import xml.etree.ElementTree as ET
-    from collections import defaultdict
+    # ── External systems (outside boundary, styled separately) ───────────────
+    ext_ids = set()
+    all_externals = (
+        list(ctx.get("external_systems", []))
+        + list(cont.get("external_services", []))
+    )
+    seen_ext = set()
+    for ext in all_externals:
+        eid = _slug(ext["id"])
+        if eid not in seen_ext:
+            seen_ext.add(eid)
+            ext_ids.add(eid)
+            lines.append(f'    {eid}["{ext["label"]}"]:::ext')
 
-    nodes = model.get("nodes", []) or []
-    edges = model.get("edges", []) or []
-    valid = {n["id"] for n in nodes}
+    lines.append("")
+    lines.append("    classDef ext fill:#f5f5f5,stroke:#999,color:#333")
+    lines.append("")
 
-    seen, clean = set(), []
-    for e in edges:
-        src, dst = e.get("from"), e.get("to")
-        if not src or not dst or src == dst:
+    # ── Build declared-ID set for relationship validation ────────────────────
+    declared = set(actor_ids) | set(cap_ids) | ext_ids
+
+    # ── Relationships (deduped, validated) ───────────────────────────────────
+    seen_rels: set = set()
+
+    def _add_rel(f: str, t: str, label: str) -> None:
+        f, t = _slug(f), _slug(t)
+        if f in declared and t in declared and (f, t) not in seen_rels:
+            seen_rels.add((f, t))
+            escaped = label.replace('"', "'")
+            lines.append(f'    {f} -->|"{escaped}"| {t}')
+
+    for rel in list(ctx.get("relationships", [])) + list(cont.get("relationships", [])):
+        _add_rel(rel["from"], rel["to"], rel.get("label", ""))
+
+    # ── Fallback: guarantee at least one actor → capability edge ─────────────
+    # If the relationships block has nothing connecting any actor to any capability,
+    # add a plain edge from the first actor to the first capability so the visual
+    # hierarchy (actor → system boundary → externals) is always present.
+    if actor_ids and cap_ids:
+        if not any(
+            (a, c) in seen_rels
+            for a in actor_ids
+            for c in cap_ids
+        ):
+            _add_rel(actor_ids[0], cap_ids[0], "uses")
+
+    return "\n".join(lines)
+
+def _clean_params(params: str) -> str:
+    """Mermaid class members cannot contain [ ] | or = — keep parameter names only."""
+    if not params:
+        return ""
+    names, current, depth = [], "", 0
+    for ch in params:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            names.append(current)
+            current = ""
             continue
-        if src not in valid or dst not in valid:
-            continue
-        if (src, dst) in seen:
-            continue
-        seen.add((src, dst))
-        clean.append(e)
+        current += ch
+    names.append(current)
+    out = []
+    for n in names:
+        n = n.split(":")[0].split("=")[0].strip()
+        if n and n not in ("self", "cls"):
+            out.append(n)
+    return ", ".join(out)
 
-    pos = _layout_from_intent(model)
-    direction = model.get("direction", "TB")
 
-    STYLES = {
-        "actor":     "ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;",
-        "framework": "rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;",
-        "process":   "rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;",
-        "datastore": "shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;",
-        "external":  "rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;",
-        "io":        "shape=note;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;",
+def _clean_type(typ: str) -> str:
+    """Reduce an annotation to a Mermaid-safe name: 'dict[str, bool] | None' -> 'dict'."""
+    if not typ:
+        return ""
+    return typ.split("|")[0].split("=")[0].split("[")[0].strip()
+
+
+
+
+def render_class_diagram(model: dict) -> str:
+    """Render a class diagram JSON model as Mermaid classDiagram."""
+    _REL = {
+        "inheritance": "<|--", "composition": "*--", "aggregation": "o--",
+        "dependency": "-->", "realization": "<|..",
     }
-    EDGE_STYLE = ("edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;jettySize=auto;"
-                  "orthogonalLoop=1;fontSize=11;fontColor=#555555;strokeColor=#888888;"
-                  "endArrow=classic;labelBackgroundColor=#ffffff;")
-    CLUSTER_STYLE = ("rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F8FF;strokeColor=#9DB8D8;"
-                     "verticalAlign=top;align=left;fontSize=14;fontStyle=1;"
-                     "spacingLeft=12;spacingTop=8;arcSize=3;")
+    lines = ["classDiagram"]
 
-    root_el = ET.Element("mxGraphModel",
-                         dx="1422", dy="762", grid="1", gridSize="10",
-                         guides="1", tooltips="1", connect="1", arrows="1",
-                         fold="1", page="1", pageScale="1",
-                         pageWidth="1654", pageHeight="1169",
-                         math="0", shadow="0")
-    xr = ET.SubElement(root_el, "root")
-    ET.SubElement(xr, "mxCell", id="0")
-    ET.SubElement(xr, "mxCell", id="1", parent="0")
-
-    # group background boxes (computed from member bounds)
-    groups = defaultdict(list)
-    for n in nodes:
-        if n.get("group"):
-            groups[n["group"]].append(n)
-    PAD, HDR = 40, 30
-    for g, members in groups.items():
-        mp = [pos[m["id"]] for m in members if m["id"] in pos]
-        if not mp:
+    for cls in model.get("classes", []):
+        fields = cls.get("fields", [])
+        methods = cls.get("methods", [])
+        if not fields and not methods:
+            # Mermaid 10.x throws "Syntax error" on an empty '{ }' body — declare it bare.
+            lines.append(f'  class {cls["name"]}')
             continue
-        x = min(p["x"] for p in mp) - PAD
-        y = min(p["y"] for p in mp) - PAD - HDR
-        x2 = max(p["x"] + p["w"] for p in mp) + PAD
-        y2 = max(p["y"] + p["h"] for p in mp) + PAD
-        cell = ET.SubElement(xr, "mxCell",
-                             id=f"cluster_{g.replace(' ', '_')}", value=g,
-                             style=CLUSTER_STYLE, vertex="1", parent="1")
-        ET.SubElement(cell, "mxGeometry",
-                      x=str(round(x)), y=str(round(y)),
-                      width=str(round(x2 - x)), height=str(round(y2 - y)),
-                      **{"as": "geometry"})
+        lines.append(f'  class {cls["name"]} {{')
+        for f in fields:
+            vis = f.get("visibility", "+")
+            typ = _clean_type(f.get("type") or "")
+            type_suffix = f" : {typ}" if typ else ""
+            lines.append(f'    {vis}{f["name"]}{type_suffix}')
+        for m in methods:
+            vis = m.get("visibility", "+")
+            ret = _clean_type(m.get("return_type") or "")
+            ret_suffix = f" {ret}" if ret else ""
+            params = _clean_params(m.get("params", ""))
+            lines.append(f'    {vis}{m["name"]}({params}){ret_suffix}')
+        lines.append("  }")
 
-    # nodes at computed coordinates
-    for n in nodes:
-        p = pos[n["id"]]
-        cell = ET.SubElement(xr, "mxCell",
-                             id=f"node_{n['id']}", value=n["label"],
-                             style=STYLES.get(n.get("type"), STYLES["process"]),
-                             vertex="1", parent="1")
-        ET.SubElement(cell, "mxGeometry",
-                      x=str(round(p["x"])), y=str(round(p["y"])),
-                      width=str(p["w"]), height=str(p["h"]),
-                      **{"as": "geometry"})
 
-    # edges with distributed connection points so they don't stack on one point
-    out_count, in_count = defaultdict(int), defaultdict(int)
-    for e in clean:
-        out_count[e["from"]] += 1
-        in_count[e["to"]] += 1
-    out_idx, in_idx = defaultdict(int), defaultdict(int)
+    for rel in model.get("relationships", []):
+        rtype = rel.get("type", "dependency")
+        arrow = _REL.get(rtype, "-->")
+        label = f' : {rel["label"]}' if rel.get("label") else ""
+        src, dst = rel["from"], rel["to"]
+        if rtype in ("inheritance", "realization"):
+            src, dst = dst, src  # Mermaid reads 'Base <|-- Derived'
+        lines.append(f'  {src} {arrow} {dst}{label}')
 
-    for i, e in enumerate(clean):
-        src, dst = e["from"], e["to"]
-        out_idx[src] += 1
-        in_idx[dst] += 1
-        frac_out = round(out_idx[src] / (out_count[src] + 1), 3)
-        frac_in = round(in_idx[dst] / (in_count[dst] + 1), 3)
 
-        if direction == "LR":
-            # flow left->right: exit right side, enter left side
-            conn = (f"exitX=1;exitY={frac_out};exitDx=0;exitDy=0;"
-                    f"entryX=0;entryY={frac_in};entryDx=0;entryDy=0;")
-        else:
-            # flow top->bottom: exit bottom, enter top
-            conn = (f"exitX={frac_out};exitY=1;exitDx=0;exitDy=0;"
-                    f"entryX={frac_in};entryY=0;entryDx=0;entryDy=0;")
 
-        cell = ET.SubElement(xr, "mxCell",
-                             id=f"edge_{i}", value=str(e.get("label", "")),
-                             style=EDGE_STYLE + conn, edge="1",
-                             source=f"node_{src}", target=f"node_{dst}",
-                             parent="1")
-        ET.SubElement(cell, "mxGeometry", relative="1", **{"as": "geometry"})
 
-    tree = ET.ElementTree(root_el)
-    ET.indent(tree, space="  ")
-    path = Path(output_path).with_suffix(".drawio")
-    tree.write(str(path), encoding="unicode", xml_declaration=False)
-    return str(path)
+    return "\n".join(lines)
+
+
+def render_sequence_diagram(model: dict) -> str:
+    """Render a sequence diagram JSON model as Mermaid sequenceDiagram."""
+    _ARROW = {"sync": "->>", "async": "->>", "return": "-->>"}
+
+    def _short(name: str) -> str:
+        """Use only the last dotted segment as the participant alias."""
+        return _slug(name.split(".")[-1])
+
+    lines = ["sequenceDiagram"]
+
+    for p in model.get("participants", []):
+        alias = _short(p)
+        label = p.split(".")[-1]
+        lines.append(f'  participant {alias} as {label}')
+
+    for msg in model.get("messages", []):
+        arrow = _ARROW.get(msg.get("type", "sync"), "->>")
+        label = msg.get("label", "")
+        lines.append(f'  {_short(msg["from"])}{arrow}{_short(msg["to"])}: {label}')
+
+    return "\n".join(lines)
+
+
+
+def render_component_diagram(model: dict) -> str:
+    """Render a component diagram JSON model as Mermaid graph TD."""
+    lines = ["graph TD", '  subgraph "Application"']
+
+    for comp in model.get("components", []):
+        cid = _slug(comp["id"])
+        tech = f" ({comp['tech']})" if comp.get("tech") else ""
+        lines.append(f'    {cid}["{comp["label"]}{tech}"]')
+
+    lines.append("  end")
+
+    for dep in model.get("dependencies", []):
+        fid = _slug(dep["from"])
+        tid = _slug(dep["to"])
+        label = f'|"{dep["label"]}"|' if dep.get("label") else ""
+        lines.append(f'  {fid} -->{label} {tid}')
+
+    return "\n".join(lines)
+
+
+
+def render_dependency_diagram(model: dict) -> str:
+    """Render a dependency diagram JSON model as Mermaid graph LR."""
+    lines = ["graph LR"]
+
+    internal = [p for p in model.get("packages", []) if p.get("kind") == "internal"]
+    external = [p for p in model.get("packages", []) if p.get("kind") != "internal"]
+
+    if internal:
+        lines.append('  subgraph "This Repo"')
+        for pkg in internal:
+            lines.append(f'    {pkg["id"]}["{pkg["label"]}"]')
+        lines.append("  end")
+
+    for pkg in external:
+        lines.append(f'  {pkg["id"]}["{pkg["label"]}"]')
+
+    for edge in model.get("edges", []):
+        label = f'|"{edge["label"]}"|' if edge.get("label") else ""
+        lines.append(f'  {edge["from"]} -->{label} {edge["to"]}')
+
+    return "\n".join(lines)
+
+
+def _slug(name: str) -> str:
+    """Convert a display name to a safe Mermaid node ID."""
+    return name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")

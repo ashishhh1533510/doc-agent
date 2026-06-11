@@ -53,7 +53,7 @@ async def run_agent(agent, prompt: str, max_retries: int = 5, base_delay: float 
             last_exc = e
             msg = str(e).lower()
             # treat common transient indicators as retryable
-            if any(token in msg for token in ("503", "unavailable", "high demand", "rate limit", "temporar")):
+            if any(token in msg for token in ("500","503", "unavailable", "high demand", "rate limit", "temporar")):
                 delay = base_delay * (2 ** (attempt - 1))
                 # jitter
                 delay = delay * (0.8 + 0.4 * (os.urandom(1)[0] / 255.0))

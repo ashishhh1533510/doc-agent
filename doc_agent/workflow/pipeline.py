@@ -1,11 +1,8 @@
 """
 The documentation pipeline: orchestration with format selection.
 
-  md / html              -> prose docs via the writer + maker-checker review loop
-  json / yaml            -> the extracted facts as a structured spec (no LLM)
-  mermaid                -> an architecture diagram via the diagrammer agent
-  png / svg              -> typed architecture image (diagrams library)
-  dot / drawio / drawio_xml -> editable architecture exports
+  md / html   -> prose docs via the writer + maker-checker review loop
+  json / yaml -> the extracted facts as a structured spec (no LLM)
 
 The pipeline picks the right producer for the requested format, then optionally
 saves the result to disk via the output tool.
@@ -26,18 +23,12 @@ from doc_agent.tools.output import (
 )
 from doc_agent.agents.writer import WriterAgent
 from doc_agent.agents.reviewer import ReviewerAgent
-from doc_agent.agents.diagrammer import DiagrammerAgent
 from doc_agent.tools.input_resolver import resolve_input
 
 
 PROSE_FORMATS = {"md", "html"}
 STRUCTURED_FORMATS = {"json", "yaml"}
-DIAGRAM_FORMATS = {"mermaid"}
-IMAGE_FORMATS = {"png", "svg"}
-EDITABLE_FORMATS = {"drawio", "dot", "drawio_xml"}
-SUPPORTED_FORMATS = (
-    PROSE_FORMATS | STRUCTURED_FORMATS | DIAGRAM_FORMATS | IMAGE_FORMATS | EDITABLE_FORMATS
-)
+SUPPORTED_FORMATS = PROSE_FORMATS | STRUCTURED_FORMATS
 
 
 class DocumentationPipeline:
@@ -46,7 +37,6 @@ class DocumentationPipeline:
     def __init__(self, max_rounds: int = 2):
         self.writer = WriterAgent()
         self.reviewer = ReviewerAgent()
-        self.diagrammer = DiagrammerAgent()
         self.max_rounds = max_rounds
 
     async def _write_reviewed_markdown(self, facts):
@@ -76,89 +66,6 @@ class DocumentationPipeline:
             llm_facts = slim_facts_for_llm(facts)   # trimmed payload for LLM calls
             result = {"format": fmt}
 
-            # --- image diagrams (1 LLM call) -> slim payload ---
-            if fmt in IMAGE_FORMATS:
-                try:
-                    saved = await self.diagrammer.diagram_typed(
-                        llm_facts, output_path or f"architecture.{fmt}", fmt=fmt
-                    )
-                    result["saved_to"] = saved
-                    if fmt == "png":
-                        import base64
-                        with open(saved, "rb") as f:
-                            result["content"] = base64.b64encode(f.read()).decode("utf-8")
-                        result["is_base64"] = True
-                    else: # svg
-                        with open(saved, "r", encoding="utf-8") as f:
-                            result["content"] = f.read()
-                except Exception as e:
-                    import traceback
-                    err_msg = f"Failed to generate technical architecture {fmt} diagram. Error: {str(e)}\n\n"
-                    if "executable" in str(e).lower() or "not found" in str(e).lower() or "graphviz" in str(e).lower():
-                        err_msg += (
-                            "This usually means the Graphviz system library ('dot' executable) is not installed.\n"
-                            "To fix this on Render, ensure you are deploying using the 'Docker' service environment "
-                            "rather than the native 'Python' environment, so that the system dependencies in the "
-                            "Dockerfile (graphviz) are installed."
-                        )
-                    else:
-                        err_msg += traceback.format_exc()
-                    result["error"] = err_msg
-                    result["content"] = None
-                return result
-
-            if fmt == "drawio":
-                try:
-                    saved = await self.diagrammer.diagram_editable(
-                        llm_facts, output_path or "architecture.svg"
-                    )
-                    result["saved_to"] = saved
-                    with open(saved, "r", encoding="utf-8") as f:
-                        result["content"] = f.read()
-                except Exception as e:
-                    import traceback
-                    err_msg = f"Failed to generate drawio editable SVG. Error: {str(e)}\n\n"
-                    if "executable" in str(e).lower() or "not found" in str(e).lower() or "graphviz" in str(e).lower():
-                        err_msg += (
-                            "This usually means the Graphviz system library ('dot' executable) is not installed.\n"
-                            "To fix this on Render, ensure you are deploying using the 'Docker' service environment "
-                            "rather than the native 'Python' environment, so that the system dependencies in the "
-                            "Dockerfile (graphviz) are installed."
-                        )
-                    else:
-                        err_msg += traceback.format_exc()
-                    result["error"] = err_msg
-                    result["content"] = None
-                return result
-
-            if fmt == "dot":
-                try:
-                    saved = await self.diagrammer.diagram_dot(
-                        llm_facts, output_path or "architecture.gv"
-                    )
-                    result["saved_to"] = saved
-                    with open(saved, "r", encoding="utf-8") as f:
-                        result["content"] = f.read()
-                except Exception as e:
-                    import traceback
-                    result["error"] = f"Failed to generate Graphviz DOT source: {str(e)}\n\n{traceback.format_exc()}"
-                    result["content"] = None
-                return result
-
-            if fmt == "drawio_xml":
-                try:
-                    saved = await self.diagrammer.diagram_drawio(
-                        llm_facts, output_path or "architecture.drawio"
-                    )
-                    result["saved_to"] = saved
-                    with open(saved, "r", encoding="utf-8") as f:
-                        result["content"] = f.read()
-                except Exception as e:
-                    import traceback
-                    result["error"] = f"Failed to generate Draw.io XML: {str(e)}\n\n{traceback.format_exc()}"
-                    result["content"] = None
-                return result
-
             # --- structured spec (0 LLM calls) -> FULL facts ---
             content = None
             if fmt in STRUCTURED_FORMATS:
@@ -167,13 +74,6 @@ class DocumentationPipeline:
                 except Exception as e:
                     import traceback
                     result["error"] = f"Failed to serialize facts: {str(e)}\n\n{traceback.format_exc()}"
-            # --- mermaid diagram (1 LLM call) -> slim payload ---
-            elif fmt in DIAGRAM_FORMATS:
-                try:
-                    content = strip_code_fence(await self.diagrammer.diagram(llm_facts))
-                except Exception as e:
-                    import traceback
-                    result["error"] = f"Failed to generate Mermaid diagram: {str(e)}\n\n{traceback.format_exc()}"
             # --- prose: md or html (writer + reviewer) -> slim payload ---
             else:
                 try:

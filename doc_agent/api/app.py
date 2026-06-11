@@ -8,6 +8,9 @@ from fastapi.responses import FileResponse
 
 from doc_agent.workflow.pipeline import DocumentationPipeline
 from doc_agent.workflow.qa import CodebaseQA
+from doc_agent.workflow.hld_pipeline import run_hld
+from doc_agent.workflow.lld_pipeline import run_lld
+
 
 app = FastAPI(title="Documentation Agent")
 pipeline = DocumentationPipeline()
@@ -37,46 +40,24 @@ class MDGenerateRequest(BaseModel):
     private_access_token: str | None = None
 
 
-class DrawioXMLGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
-class DrawioGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
-class PNGGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
-class SVGGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
-class DotGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
-class MermaidGenerateRequest(BaseModel):
-    project_path: str
-    output_path: str | None = None
-    private_access_token: str | None = None
-
-
 class AskRequest(BaseModel):
     project_path: str
     question: str
     private_access_token: str | None = None
+
+class HLDRequest(BaseModel):
+    project_path: str
+    output_type: str = "combined"   # combined | context | container
+    output_path: str | None = None
+    private_access_token: str | None = None
+
+
+class LLDRequest(BaseModel):
+    project_path: str
+    diagram_type: str = "class"     # class | sequence | component | dependency
+    output_path: str | None = None
+    private_access_token: str | None = None
+
 
 
 @app.get("/health")
@@ -115,53 +96,26 @@ async def generate_readme_md(req: MDGenerateRequest):
     )
 
 
-# ===== HLD (High-Level Design) ENDPOINTS - Diagram Formats =====
-@app.post("/generate/hld/drawio_xml")
-async def generate_hld_drawio_xml(req: DrawioXMLGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="drawio_xml",
-        output_path=req.output_path, token=req.private_access_token,
+# ===== HLD2 / LLD ENDPOINTS - Repo-specific C4 + LLD diagrams =====
+@app.post("/generate/hld2/")
+async def generate_hld2(req: HLDRequest):
+    return await run_hld(
+        req.project_path,
+        output_type=req.output_type,
+        output_path=req.output_path,
+        token=req.private_access_token,
     )
 
 
-@app.post("/generate/hld/drawio")
-async def generate_hld_drawio(req: DrawioGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="drawio",
-        output_path=req.output_path, token=req.private_access_token,
+@app.post("/generate/lld/")
+async def generate_lld(req: LLDRequest):
+    return await run_lld(
+        req.project_path,
+        diagram_type=req.diagram_type,
+        output_path=req.output_path,
+        token=req.private_access_token,
     )
 
-
-@app.post("/generate/hld/png")
-async def generate_hld_png(req: PNGGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="png",
-        output_path=req.output_path, token=req.private_access_token,
-    )
-
-
-@app.post("/generate/hld/svg")
-async def generate_hld_svg(req: SVGGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="svg",
-        output_path=req.output_path, token=req.private_access_token,
-    )
-
-
-@app.post("/generate/hld/dot")
-async def generate_hld_dot(req: DotGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="dot",
-        output_path=req.output_path, token=req.private_access_token,
-    )
-
-
-@app.post("/generate/hld/mermaid")
-async def generate_hld_mermaid(req: MermaidGenerateRequest):
-    return await pipeline.run(
-        req.project_path, fmt="mermaid",
-        output_path=req.output_path, token=req.private_access_token,
-    )
 
 
 @app.post("/ask")

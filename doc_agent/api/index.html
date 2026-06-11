@@ -285,14 +285,16 @@
             <option value="readme_md" selected>Markdown README</option>
             <option value="readme_html">HTML README</option>
           </optgroup>
-          <optgroup label="Diagram (HLD)">
-            <option value="hld_drawio_xml">draw.io XML — native</option>
-            <option value="hld_drawio">draw.io — editable SVG</option>
-            <option value="hld_png">PNG image</option>
-            <option value="hld_svg">SVG image</option>
-            <option value="hld_dot">Graphviz DOT</option>
-            <option value="hld_mermaid">Mermaid</option>
+          <optgroup label="Diagram (C4 — HLD)">
+            <option value="hld2_combined">C4 Combined (context + containers)</option>
           </optgroup>
+          <optgroup label="Diagram (LLD)">
+            <option value="lld_class">Class diagram</option>
+            <option value="lld_sequence">Sequence diagram</option>
+            <option value="lld_component">Component diagram</option>
+            <option value="lld_dependency">Dependency diagram</option>
+          </optgroup>
+
           <optgroup label="Q&amp;A">
             <option value="ask">Ask a question</option>
           </optgroup>
@@ -346,20 +348,22 @@
     readme_yaml:   { path: "/generate/readme/yaml", mode: "gen", cost: 0,  out: "facts.yaml" },
     readme_md:     { path: "/generate/readme/md",   mode: "gen", cost: 3,  out: "README.md" },
     readme_html:   { path: "/generate/readme/html", mode: "gen", cost: 3,  out: "readme.html" },
-    hld_drawio_xml:{ path: "/generate/hld/drawio_xml", mode: "gen", cost: 1, out: "hld.drawio" },
-    hld_drawio:    { path: "/generate/hld/drawio",   mode: "gen", cost: 1,  out: "hld_editable.drawio" },
-    hld_png:       { path: "/generate/hld/png",      mode: "gen", cost: 1,  out: "hld.png" },
-    hld_svg:       { path: "/generate/hld/svg",      mode: "gen", cost: 1,  out: "hld.svg" },
-    hld_dot:       { path: "/generate/hld/dot",      mode: "gen", cost: 1,  out: "hld.dot" },
-    hld_mermaid:   { path: "/generate/hld/mermaid",  mode: "gen", cost: 1,  out: "hld.mmd" },
     ask:           { path: "/ask",                   mode: "ask", cost: 1,  out: "" },
+    hld2_combined:  { path: "/generate/hld2/", mode: "gen", param: {output_type: "combined"},  cost: 4, out: "hld_combined.mmd" },
+    lld_class:      { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "class"},      cost: 4, out: "lld_class.mmd" },
+    lld_sequence:   { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "sequence"},   cost: 4, out: "lld_sequence.mmd" },
+    lld_component:  { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "component"},  cost: 4, out: "lld_component.mmd" },
+    lld_dependency: { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "dependency"}, cost: 4, out: "lld_dependency.mmd" },
   };
+
 
   const COST_TEXT = {
     0: ["ok",   "0 LLM calls — free, safe to demo"],
     1: ["warn", "1 LLM call"],
     3: ["warn", "2–3 LLM calls — heaviest on quota"],
+    4: ["hot",  "3–5 LLM calls — multi-agent pipeline"],
   };
+
 
   const $ = (id) => document.getElementById(id);
 
@@ -399,6 +403,8 @@
     } else {
       const out = $("output").value.trim() || null;
       body = { project_path: project, output_path: out, private_access_token: token };
+      if (a.param) Object.assign(body, a.param);
+
     }
 
     const url = base + a.path;
@@ -472,7 +478,7 @@
       dl.textContent = "↓ " + download.filename;
       dl.onclick = () => triggerDownload(download.filename, download.text, download.isBase64);
 
-      const fmt = parsed.format;
+      const fmt = parsed.format || ((parsed.output_type || parsed.diagram_type) ? "mermaid" : null);
       const content = parsed.content;
       const container = $("result-container");
 
@@ -491,47 +497,6 @@
         } catch (e) {
           console.error("Mermaid render failed:", e);
         }
-      } else if (fmt === "png") {
-        container.innerHTML = `
-          <div class="ready">
-            <div class="ready-name">✓ Technical Architecture Image ready</div>
-            <div class="ready-sub">Click download to save the <code>.png</code> file, or view it below.</div>
-          </div>
-          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; text-align: center;">
-            <img src="data:image/png;base64,${content}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);" />
-          </div>
-        `;
-      } else if (fmt === "svg" || fmt === "drawio") {
-        container.innerHTML = `
-          <div class="ready">
-            <div class="ready-name">✓ SVG Diagram ready</div>
-            <div class="ready-sub">Click download to save the <code>.svg</code> file, or view it below.</div>
-          </div>
-          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: auto; display: flex; justify-content: center;">
-            <div class="svg-inline-container" style="width: 100%; text-align: center;">${content}</div>
-          </div>
-        `;
-        const svgEl = container.querySelector(".svg-inline-container svg");
-        if (svgEl) {
-          svgEl.style.maxWidth = "100%";
-          svgEl.style.height = "auto";
-        }
-      } else if (fmt === "dot") {
-        container.innerHTML = `
-          <div class="ready">
-            <div class="ready-name">✓ Graphviz DOT source ready</div>
-            <div class="ready-sub">Click download to save the <code>.dot</code> file, or view the source below.</div>
-          </div>
-          <pre class="result" style="margin-top: 20px;">${content}</pre>
-        `;
-      } else if (fmt === "drawio_xml") {
-        container.innerHTML = `
-          <div class="ready">
-            <div class="ready-name">✓ Draw.io XML ready</div>
-            <div class="ready-sub">Click download to save the <code>.drawio</code> file, then open it in <a href="https://app.diagrams.net/" target="_blank" style="color:var(--accent); text-decoration:underline;">draw.io</a>.</div>
-          </div>
-          <pre class="result" style="margin-top: 20px; max-height: 250px;">${content}</pre>
-        `;
       } else {
         container.innerHTML = `
           <div class="ready">

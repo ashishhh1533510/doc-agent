@@ -1,8 +1,19 @@
-@"
+# Python
 .venv/
+venv/
+env/
 __pycache__/
 *.pyc
+
+# Secrets / env
 .env
+*.env
+
+# Local tooling / session artifacts
+.agents/
+skills-lock.json
+_audit_*.py
+
 # generated test artifacts
 architecture.*
 *.drawio
@@ -20,4 +31,3 @@ t3.yaml
 t4_readme.md
 t5.drawio
 test4_repo.json
-"@ | Out-File -FilePath .gitignore -Encoding utf8 -Append
