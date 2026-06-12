@@ -7,6 +7,7 @@ mermaid     -> C4 combined HLD + LLD diagram text (saved as-is)
 
 All text formats are written as plain text. Deterministic -- no LLM here.
 """
+import re
 import json
 from pathlib import Path
 
@@ -338,45 +339,126 @@ def render_sequence_diagram(model: dict) -> str:
 
 
 def render_component_diagram(model: dict) -> str:
-    """Render a component diagram JSON model as Mermaid graph TD."""
-    lines = ["graph TD", '  subgraph "Application"']
+    """Render a component diagram JSON model as Mermaid graph LR.
+
+    Internal components (layer != 'external') go inside the 'Application' subgraph.
+    External components (layer == 'external') are rendered outside with ::ext style.
+    """
+    seen_ids: dict[str, str] = {}   # original_id -> slug
+    internal_comps: list[dict] = []
+    external_comps: list[dict] = []
 
     for comp in model.get("components", []):
-        cid = _slug(comp["id"])
-        tech = f" ({comp['tech']})" if comp.get("tech") else ""
-        lines.append(f'    {cid}["{comp["label"]}{tech}"]')
+        raw_id = (comp.get("id") or "").strip()
+        if not raw_id:
+            continue
+        slug = _safe_id(raw_id)
+        if slug in seen_ids.values():
+            continue  # duplicate after slugging
+        seen_ids[raw_id] = slug
+        tech = (comp.get("tech") or "").strip()
+        label = _safe_label(comp.get("label") or raw_id)
+        entry = {"slug": slug, "label": label, "tech": tech}
+        if (comp.get("layer") or "").lower() == "external":
+            external_comps.append(entry)
+        else:
+            internal_comps.append(entry)
 
-    lines.append("  end")
+    lines = ["graph LR"]
+
+    if internal_comps:
+        lines.append('  subgraph APP["Application"]')
+        for c in internal_comps:
+            tech_str = f" ({c['tech']})" if c["tech"] else ""
+            lines.append(f'    {c["slug"]}["{c["label"]}{tech_str}"]')
+        lines.append("  end")
+        lines.append("")
+
+    for c in external_comps:
+        tech_str = f" ({c['tech']})" if c["tech"] else ""
+        lines.append(f'  {c["slug"]}["{c["label"]}{tech_str}"]:::ext')
+
+    if external_comps:
+        lines.append("  classDef ext fill:#f5f5f5,stroke:#999,color:#333")
+        lines.append("")
+
+    declared = set(seen_ids.values())
+    seen_edges: set[tuple] = set()
 
     for dep in model.get("dependencies", []):
-        fid = _slug(dep["from"])
-        tid = _slug(dep["to"])
-        label = f'|"{dep["label"]}"|' if dep.get("label") else ""
-        lines.append(f'  {fid} -->{label} {tid}')
+        fraw = (dep.get("from") or "").strip()
+        traw = (dep.get("to") or "").strip()
+        fid = seen_ids.get(fraw) or _safe_id(fraw)
+        tid = seen_ids.get(traw) or _safe_id(traw)
+        if fid not in declared or tid not in declared or fid == tid:
+            continue
+        if (fid, tid) in seen_edges:
+            continue
+        seen_edges.add((fid, tid))
+        lbl = _safe_label(dep.get("label") or "")
+        label_str = f'|"{lbl}"|' if lbl else ""
+        lines.append(f'  {fid} -->{label_str} {tid}')
 
     return "\n".join(lines)
 
 
 
 def render_dependency_diagram(model: dict) -> str:
-    """Render a dependency diagram JSON model as Mermaid graph LR."""
+    """Render a dependency diagram JSON model as Mermaid graph LR.
+
+    Internal packages go in 'This Repo' subgraph.
+    External packages go in 'External Libraries' subgraph.
+    """
+    seen_ids: dict[str, str] = {}   # original_id -> slug
+    internal_pkgs: list[dict] = []
+    external_pkgs: list[dict] = []
+
+    for pkg in model.get("packages", []):
+        raw_id = (pkg.get("id") or "").strip()
+        if not raw_id:
+            continue
+        slug = _safe_id(raw_id)
+        if slug in seen_ids.values():
+            continue  # duplicate
+        seen_ids[raw_id] = slug
+        entry = {"slug": slug, "label": _safe_label(pkg.get("label") or raw_id)}
+        if (pkg.get("kind") or "").lower() == "internal":
+            internal_pkgs.append(entry)
+        else:
+            external_pkgs.append(entry)
+
     lines = ["graph LR"]
 
-    internal = [p for p in model.get("packages", []) if p.get("kind") == "internal"]
-    external = [p for p in model.get("packages", []) if p.get("kind") != "internal"]
-
-    if internal:
-        lines.append('  subgraph "This Repo"')
-        for pkg in internal:
-            lines.append(f'    {pkg["id"]}["{pkg["label"]}"]')
+    if internal_pkgs:
+        lines.append('  subgraph REPO["This Repo"]')
+        for p in internal_pkgs:
+            lines.append(f'    {p["slug"]}["{p["label"]}"]')
         lines.append("  end")
+        lines.append("")
 
-    for pkg in external:
-        lines.append(f'  {pkg["id"]}["{pkg["label"]}"]')
+    if external_pkgs:
+        lines.append('  subgraph EXT["External Libraries"]')
+        for p in external_pkgs:
+            lines.append(f'    {p["slug"]}["{p["label"]}"]')
+        lines.append("  end")
+        lines.append("")
+
+    declared = set(seen_ids.values())
+    seen_edges: set[tuple] = set()
 
     for edge in model.get("edges", []):
-        label = f'|"{edge["label"]}"|' if edge.get("label") else ""
-        lines.append(f'  {edge["from"]} -->{label} {edge["to"]}')
+        fraw = (edge.get("from") or "").strip()
+        traw = (edge.get("to") or "").strip()
+        fid = seen_ids.get(fraw) or _safe_id(fraw)
+        tid = seen_ids.get(traw) or _safe_id(traw)
+        if fid not in declared or tid not in declared or fid == tid:
+            continue
+        if (fid, tid) in seen_edges:
+            continue
+        seen_edges.add((fid, tid))
+        lbl = _safe_label(edge.get("label") or "")
+        label_str = f'|"{lbl}"|' if lbl else ""
+        lines.append(f'  {fid} -->{label_str} {tid}')
 
     return "\n".join(lines)
 
@@ -384,3 +466,17 @@ def render_dependency_diagram(model: dict) -> str:
 def _slug(name: str) -> str:
     """Convert a display name to a safe Mermaid node ID."""
     return name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+
+_MERMAID_RESERVED = {
+    "end", "subgraph", "loop", "alt", "else", "opt",
+    "par", "break", "critical", "note", "rect", "ref",
+}
+
+def _safe_id(name: str) -> str:
+    """Slug a name and append '_' if it's a Mermaid reserved word."""
+    slug = re.sub(r"[^\w]", "_", (name or "").lower()).strip("_") or "node"
+    return slug + "_" if slug in _MERMAID_RESERVED else slug
+
+def _safe_label(text: str) -> str:
+    """Collapse multi-line text, replace double-quotes, strip semicolons."""
+    return (text or "").replace("\n", " ").replace('"', "'").replace(";", ",").strip()

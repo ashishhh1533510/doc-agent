@@ -11,5 +11,9 @@ agent-framework
 diagrams
 markdown
 graphviz
-tree-sitter>=0.23,<0.25
-tree-sitter-language-pack
+tree-sitter>=0.25,<0.26
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-c-sharp
+tree-sitter-java

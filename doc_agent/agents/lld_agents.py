@@ -140,6 +140,7 @@ Produce a JSON object grouping modules into software components:
       "id": "<slug>",
       "label": "<Component Name>",
       "tech": "<technology>",
+      "layer": "<entry|core|infrastructure|external>",
       "interfaces": ["<interface or method exposed>"]
     }
   ],
@@ -158,7 +159,19 @@ Rules:
 - Dependencies must be grounded in the import_graph from RichFacts.
 - interfaces[] should list the public routes or methods each component exposes.
 - Labels: short verb phrases on a single line — no quotes or semicolons.
-- Respond with ONLY the JSON object, no other text."""
+- Respond with ONLY the JSON object, no other text.
+
+=== LAYERS ===
+Classify every component with one of these layers — the renderer uses it for layout:
+- "entry"          : HTTP/CLI entrypoints (FastAPI app, CLI runner, route handlers)
+- "core"           : orchestrators, domain logic, pipeline controllers
+- "infrastructure" : adapters, LLM/DB/queue clients, internal utility libraries
+- "external"       : third-party services or systems outside this repo that this
+                     repo calls (external APIs, hosted DBs, SaaS services).
+                     Do NOT use "external" for third-party Python libraries — those
+                     belong in the dependency diagram, not here."""
+
+
 
 # ---------------------------------------------------------------------------
 # Dependency Diagram Agent
@@ -178,7 +191,12 @@ Produce a JSON object showing package-level dependencies:
   ]
 }
 
+
 Rules:
+- Source rule: ONLY use packages that appear in RichFacts.imports[]. Do NOT infer
+  from Dockerfile, package.json, requirements.txt, lock files, or any config file.
+- Language rule: match the primary language of the repo. For a Python repo, only
+  Python package names appear here — never npm/JavaScript packages.
 - Internal packages: top-level sub-packages of this repo (from import_graph keys).
 - External packages: third-party libraries in imports[] that are architecturally significant
   (framework, LLM client, DB driver, queue client). Exclude stdlib noise (json, os, re, etc.).
