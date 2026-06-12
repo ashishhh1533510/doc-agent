@@ -10,7 +10,11 @@ unchanged. The Python logic now lives in extractors/python_extractor.py.
 from pathlib import Path
 
 from doc_agent.tools.extractors.registry import get_extractor, EXTENSION_TO_LANGUAGE
-from doc_agent.tools.language_detector import SKIP_DIRS, SUPPORTED_LANGUAGES
+from doc_agent.tools.language_detector import SKIP_DIRS, SUPPORTED_LANGUAGES, detect_languages
+from doc_agent.tools.import_graph import build_import_graph, detect_frameworks
+from doc_agent.tools.component_clusters import compute_components
+
+
 
 # Re-export the Python source parser under its old name for any back-compat use.
 from doc_agent.tools.extractors.python_extractor import (
@@ -110,36 +114,33 @@ def _detect_framework(files: list[dict]) -> str:
     return "unknown"
 
 
+# ---------------------------------------------------------------------------
+# Rich extraction — per-file facts + resolved import graph + frameworks.
+# ---------------------------------------------------------------------------
+
 def extract_rich_from_directory(path) -> dict:
-    """RichFacts: per-file details plus import graph, language counts, framework."""
+    """RichFacts: per-file FileFacts, a resolved import graph, language counts,
+    detected frameworks, and the deterministic component model (components +
+    weighted edges + architecture pattern) used to keep diagrams repo-specific."""
     path = Path(path)
     files = extract_from_directory(path)
-
-    pkg_name = path.name
-    import_graph: dict[str, list[str]] = {}
-    for entry in files:
-        if "error" in entry:
-            continue
-        try:
-            rel = Path(entry["file"]).relative_to(path)
-            mod = str(rel).replace("\\", "/").replace("/", ".").removesuffix(".py")
-        except ValueError:
-            continue
-        internal = [i for i in entry.get("imports", []) if i.startswith(pkg_name)]
-        if internal:
-            import_graph[mod] = internal
-
-    languages = _count_languages(path)
-    primary = max(languages, key=lambda k: languages[k]) if languages else "unknown"
-    framework = _detect_framework(files)
-
+    langinfo = detect_languages(path)
+    frameworks = detect_frameworks(files)
+    import_graph = build_import_graph(files, path)
+    comp = compute_components(import_graph, files, path)
     return {
-        "primary_language": primary,
-        "languages": languages,
-        "framework": framework,
+        "primary_language": langinfo["dominant"] or "unknown",
+        "languages": langinfo["languages"],
+        "framework": frameworks[0] if frameworks else "unknown",
+        "frameworks": frameworks,
         "files": files,
         "import_graph": import_graph,
+        "components": comp["components"],
+        "edges": comp["edges"],
+        "architecture_signals": comp["architecture_signals"],
     }
+
+
 
 
 if __name__ == "__main__":

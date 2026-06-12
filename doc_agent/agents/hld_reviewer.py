@@ -75,7 +75,7 @@ CHECK 5 — NO IMPLEMENTATION DETAIL NODES
 ========================================================
 
 Reject if any container label is:
-- A file name (ends in ".py", ".js", ".ts")
+- A file name (ends in .py, .js, .jsx, .ts, .tsx, .cs, .java)
 - A folder name that appears in import_graph keys
 - A generic module name: "utils", "models", "helpers", "common",
   "shared", "base", "core", "constants", "exceptions", "validators",
@@ -149,6 +149,32 @@ Common failure patterns:
 - No external systems — diagram looks self-contained when it isn't
 
 Flag: "Diagram fails 5-second readability: <specific reason>"
+
+========================================================
+CHECK 10 — COMPONENT GROUNDING (HARD)
+========================================================
+
+RichFacts includes deterministic `components` (id, files, fan_in/out, has_routes,
+has_db_models) and `component_edges` from the real import graph. Capabilities were
+required to be derived from them.
+
+Containers — for every C4Model.containers.containers[]:
+  It must trace to ≥1 component id, or to a capability whose evidence cites a
+  component id and a real file. A container matching no component and no real file
+  is INVENTED → REJECT.
+
+Relationships — for every relationship in context/containers relationships[]:
+  The endpoints' components must have a corresponding component_edge (either
+  direction), OR an endpoint is an external system / actor. A relationship with no
+  backing component_edge and no import evidence is INVENTED → REJECT.
+
+Flag: "Container '<name>' traces to no component or real file (invented)"
+Flag: "Relationship '<from>'->'<to>' has no backing component edge (invented)"
+
+Ungrounded nodes/edges are the #1 cause of generic, identical diagrams.
+This check is non-negotiable.
+
+
 
 ========================================================
 OUTPUT

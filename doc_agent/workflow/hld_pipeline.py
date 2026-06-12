@@ -6,7 +6,7 @@ output_type controls what gets rendered:
 """
 
 import json
-
+from doc_agent.tools.component_clusters import slim_components
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input
 from doc_agent.tools.output import render_c4_combined, save_text
@@ -14,13 +14,17 @@ from doc_agent.agents.arch_context import ArchitectureContextAgent
 from doc_agent.agents.hld_architect import HLDArchitectureAgent
 from doc_agent.agents.hld_reviewer import HLDReviewerAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
+from doc_agent.workflow.grounding import check_grounding
+
 
 
 _RENDERERS = {
     "combined":  render_c4_combined,
 }
 def _slim_for_hld(rich_facts: dict) -> dict:
-    """Strip per-method detail the HLD agent doesn't need, keeping prompt small."""
+    """Strip per-method detail the HLD agent doesn't need, keeping the prompt small.
+    Carries the deterministic components/edges/pattern so the agent must ground
+    its diagram in them instead of inventing generic shape."""
     slim_files = []
     for f in rich_facts.get("files", []):
         slim_files.append({
@@ -35,10 +39,15 @@ def _slim_for_hld(rich_facts: dict) -> dict:
     return {
         "primary_language": rich_facts.get("primary_language"),
         "framework": rich_facts.get("framework"),
+        "frameworks": rich_facts.get("frameworks", []),
         "languages": rich_facts.get("languages"),
+        "architecture_signals": rich_facts.get("architecture_signals", {}),
+        "components": slim_components(rich_facts.get("components", [])),
+        "component_edges": rich_facts.get("edges", []),
         "import_graph": rich_facts.get("import_graph", {}),
         "files": slim_files,
     }
+
 
 
 async def run_hld(
@@ -81,6 +90,10 @@ async def run_hld(
 
         for round_num in range(1, max_rounds + 1):
             verdict = await reviewer.review(slim_facts, arch_ctx, model)
+            ground_issues = check_grounding(model, slim_facts, arch_ctx)
+            if ground_issues:
+                verdict["approved"] = False
+                verdict["issues"] = verdict.get("issues", []) + ground_issues
             trace.append({
                 "round": round_num,
                 "approved": verdict["approved"],
@@ -89,6 +102,7 @@ async def run_hld(
             if verdict["approved"]:
                 break
             model = await hld_agent.revise(slim_facts, arch_ctx, model, verdict["issues"])
+
 
 
         # Stage 3 — deterministic rendering

@@ -26,13 +26,26 @@ def _parse_model(text: str) -> dict:
     except (json.JSONDecodeError, AttributeError) as e:
         raise ValueError(f"LLD agent returned unparseable JSON: {text[:200]}") from e
 
+_GROUNDING = """GROUNDING (applies to the whole diagram):
+RichFacts includes deterministic `components` (id, files, fan_in/out, has_routes,
+has_db_models), `component_edges`, and `architecture_signals` from the real import
+graph — treat them as ground truth. Every component/participant/package you emit
+must map to a given component id or a real class/file in RichFacts; never invent
+one. Every dependency/message/edge must trace to component_edges, the import_graph,
+or a call graph. Ungrounded nodes or edges will be rejected.
+
+"""
+
+
 def _base_prompt(rich_facts: dict, arch_context: dict) -> str:
     return (
-        "RichFacts (JSON):\n\n"
+        _GROUNDING
+        + "RichFacts (JSON):\n\n"
         + json.dumps(rich_facts, indent=2, ensure_ascii=False)
         + "\n\nArchitectureContext (JSON):\n\n"
         + json.dumps(arch_context, indent=2, ensure_ascii=False)
     )
+
 
 # ---------------------------------------------------------------------------
 # Class Diagram Agent
@@ -114,7 +127,7 @@ Produce a JSON object tracing the SINGLE most important end-to-end workflow:
 
 Rules:
 - Start from the entry point in ArchitectureContext.key_workflows[0].
-- Participants must be real components from ArchitectureContext.components or real
+- Participants must be real components from RichFacts.components or real
   classes/route handlers from RichFacts. Use short names ("RuntimeManager",
   not "doc_agent.core.RuntimeManager").
 - Aim for 3-6 participants and 6-15 messages: enough to tell the story, few enough to read.
@@ -150,7 +163,7 @@ Produce a JSON object grouping modules into software components:
 }
 
 Rules:
-- Use ArchitectureContext.components as your component list. Do not invent new ones.
+- Use RichFacts.components (the deterministic component list) as your component list. Do not invent new ones.
 - Group related modules (same folder or same responsibility) under one component.
 - ids: lowercase letters, digits and underscores only (e.g. "api_layer").
 - Every dependencies[].from and .to MUST exactly match a declared components[].id.

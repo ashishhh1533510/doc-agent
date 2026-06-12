@@ -188,7 +188,7 @@ RULE 3 — ACTOR DERIVATION FROM EVIDENCE
 Derive actors from the entry point evidence in RichFacts:
 
 - If RichFacts has HTTP routes: there is a client caller
-- If RichFacts has a __main__ or CLI entry: there is a developer/operator
+- If RichFacts has a main/Program/index entry or a has_main_entry component: there is a developer/operator
 - If RichFacts has no entry points (Library/SDK): the actor is the code
   that imports this library — label it "Developer / Application"
 - If RichFacts has scheduler triggers or event consumers: the actor is a
@@ -201,7 +201,7 @@ Maximum 2 actors.
 RULE 4 — RELATIONSHIP DERIVATION FROM EVIDENCE
 ========================================================
 
-Derive relationships using only these two sources:
+Derive relationships using only these sources:
 
 SOURCE A — import_graph:
   If module A imports module B, and A and B belong to different capabilities,
@@ -210,6 +210,11 @@ SOURCE A — import_graph:
 SOURCE B — routes and call graphs:
   If a route handler in capability A calls into capability B,
   there is a relationship from A to B.
+
+SOURCE C — component_edges (PRIMARY):
+  RichFacts.component_edges lists the real weighted dependencies between
+  components. Prefer these as the backbone of containers.relationships[];
+  a relationship with no matching component_edge or import is not allowed.
 
 Apply the relationship removal test to every candidate:
   "If this relationship were removed from the diagram, would an architect

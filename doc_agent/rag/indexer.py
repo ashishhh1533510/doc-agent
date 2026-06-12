@@ -18,14 +18,16 @@ def _facts_to_chunks(facts: list[dict]) -> list[dict]:
     chunks = []
     for file in facts:
         module = file.get("file", "?")
+        lang = file.get("language", "")
+        header = f"File: {module}\n" + (f"Language: {lang}\n" if lang else "")
         for fn in file.get("functions", []):
-            text = (f"File: {module}\n"
+            text = (header +
                     f"Function: {fn['signature']}\n"
                     f"{fn.get('docstring') or ''}")
             chunks.append({"id": f"{module}::{fn['name']}", "text": text})
         for cls in file.get("classes", []):
             method_names = ", ".join(m["name"] for m in cls.get("methods", []))
-            text = (f"File: {module}\n"
+            text = (header +
                     f"Class: {cls['name']}\n"
                     f"{cls.get('docstring') or ''}\n"
                     f"Methods: {method_names}")

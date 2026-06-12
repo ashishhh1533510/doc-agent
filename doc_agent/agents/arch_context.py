@@ -19,6 +19,36 @@ You have NO prior knowledge of what this system is.
 You must discover the architecture purely from the evidence.
 
 ========================================================
+PHASE 0 — COMPONENT GROUNDING (READ FIRST, OVERRIDES ALL)
+========================================================
+
+RichFacts includes deterministic inputs computed from the real import graph
+(NOT by you). Treat them as GROUND TRUTH you must build on:
+
+- `components`: each has id, files, languages, fan_in, fan_out, has_routes,
+  has_db_models, has_main_entry, file_count.
+- `architecture_signals`: {pattern, evidence} — the detected architecture pattern.
+- `component_edges`: real weighted dependencies between components.
+
+HARD RULES (a downstream automated check enforces these — violations are REJECTED):
+
+1. Every capability MUST be built from one or more of these component ids. You MAY
+   merge several components into one capability with a responsibility-based name.
+   You may NOT invent a capability mapping to no component, and you may NOT output
+   more capabilities than there are components.
+2. Each capability's `evidence` MUST cite at least one component id AND one real
+   file path from that component's `files`.
+3. Use the metrics for scoring: high fan_in ⇒ foundational/shared; high fan_out ⇒
+   orchestrator/entry; has_routes ⇒ communication boundary; has_db_models ⇒
+   persistence; has_main_entry ⇒ entry point.
+4. Capability relationships MUST trace to `component_edges` or import_graph.
+
+Phases 1–8 below still apply, but they SCORE, MERGE, and NAME the GIVEN components —
+they never invent new structure. The system's shape is already fixed by the
+components; your job is to name and compress them well.
+
+
+========================================================
 PHASE 1 — EVIDENCE INVENTORY
 ========================================================
 
@@ -393,12 +423,14 @@ OUTPUT FORMAT
   "pattern": "<style>",
   "node_budget": <integer from Phase 5 budget range — use the midpoint>,
   "capabilities": [
-    {
+      {
       "name": "<concern name from Phase 6>",
       "role": "<one sentence: what architectural function this serves>",
-      "evidence": ["<file path or class that is part of this concern>"],
+      "evidence": ["<component id>", "<real file path from that component>"],
+      "component_ids": ["<component id this capability is built from>"],
       "score": <integer 7-10 after merging>
     }
+
   ],
   "external_systems": [
     {
@@ -438,6 +470,10 @@ Before outputting, verify:
 ✓ Every capability name passes the responsibility test (describes what, not how)
 ✓ No capability name contains a framework or library name as its primary identifier
 ✓ primary_workflow contains 2–5 entries, all present in capabilities[].name
+✓ Every capability has a non-empty component_ids drawn from RichFacts.components
+✓ capabilities[] count ≤ number of components in RichFacts.components
+✓ Every capability's evidence cites a component id and a real file path
+
 
 Respond with ONLY the JSON. No preamble, no explanation."""
 

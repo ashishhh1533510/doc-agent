@@ -9,6 +9,7 @@ diagram_type controls which diagram is generated:
 """
 
 import json
+from doc_agent.tools.component_clusters import slim_components
 
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input
@@ -23,6 +24,8 @@ from doc_agent.agents.lld_agents import (
 )
 from doc_agent.agents.lld_reviewer import LLDReviewerAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
+from doc_agent.workflow.grounding import check_grounding
+
 
 
 _AGENT_MAP = {
@@ -40,7 +43,8 @@ _RENDERER_MAP = {
 }
 
 def _slim_for_lld(rich_facts: dict) -> dict:
-    """Keep class/method/call detail for LLD but drop raw function bodies and trim noise."""
+    """Keep class/method/call detail for LLD but drop raw bodies and trim noise.
+    Also carries the deterministic components/edges/pattern for grounding."""
     slim_files = []
     for f in rich_facts.get("files", []):
         slim_files.append({
@@ -54,12 +58,8 @@ def _slim_for_lld(rich_facts: dict) -> dict:
                     "is_db_model": c.get("is_db_model", False),
                     "fields": c.get("fields", []),
                     "methods": [
-                        {
-                            "name": m["name"],
-                            "signature": m.get("signature"),
-                            "is_async": m.get("is_async", False),
-                            "calls": m.get("calls", []),
-                        }
+                        {"name": m["name"], "signature": m.get("signature"),
+                         "is_async": m.get("is_async", False), "calls": m.get("calls", [])}
                         for m in c.get("methods", [])
                     ],
                 }
@@ -69,9 +69,14 @@ def _slim_for_lld(rich_facts: dict) -> dict:
     return {
         "primary_language": rich_facts.get("primary_language"),
         "framework": rich_facts.get("framework"),
+        "frameworks": rich_facts.get("frameworks", []),
+        "architecture_signals": rich_facts.get("architecture_signals", {}),
+        "components": slim_components(rich_facts.get("components", [])),
+        "component_edges": rich_facts.get("edges", []),
         "import_graph": rich_facts.get("import_graph", {}),
         "files": slim_files,
     }
+
 
 
 
@@ -114,6 +119,10 @@ async def run_lld(
 
         for round_num in range(1, max_rounds + 1):
             verdict = await reviewer.review(slim_facts, arch_ctx, model, diagram_type)
+            ground_issues = check_grounding(model, slim_facts, arch_ctx)
+            if ground_issues:
+                verdict["approved"] = False
+                verdict["issues"] = verdict.get("issues", []) + ground_issues
             trace.append({
                 "round": round_num,
                 "approved": verdict["approved"],
@@ -122,6 +131,7 @@ async def run_lld(
             if verdict["approved"]:
                 break
             model = await lld_agent.revise(slim_facts, arch_ctx, model, verdict["issues"])
+
 
         # Stage 3 — deterministic rendering
         content = _RENDERER_MAP[diagram_type](model)
