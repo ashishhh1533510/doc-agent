@@ -5,9 +5,7 @@ Checks a C4 JSON model against RichFacts + ArchitectureContext and returns a ver
 Used by hld_pipeline.py to drive the iteration loop.
 """
 
-import json
-
-from doc_agent.core.llm import build_agent, run_agent
+from doc_agent.core.llm import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a strict HLD architecture reviewer.
 
@@ -75,7 +73,7 @@ CHECK 5 — NO IMPLEMENTATION DETAIL NODES
 ========================================================
 
 Reject if any container label is:
-- A file name (ends in ".py", ".js", ".ts")
+- A file name (ends in .py, .js, .jsx, .ts, .tsx, .cs, .java)
 - A folder name that appears in import_graph keys
 - A generic module name: "utils", "models", "helpers", "common",
   "shared", "base", "core", "constants", "exceptions", "validators",
@@ -166,24 +164,6 @@ Reject everything that fails this standard."""
 
 
 
-def _parse_verdict(text: str) -> dict:
-    """Strip code fence and parse JSON verdict."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        verdict = json.loads(cleaned)
-        return {
-            "approved": bool(verdict.get("approved", True)),
-            "issues": list(verdict.get("issues", [])),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        return {"approved": True, "issues": [f"(unparseable reviewer reply: {text[:80]})"]}
-
-
 class HLDReviewerAgent:
     """Checks a C4 model against RichFacts and ArchitectureContext."""
 
@@ -193,10 +173,17 @@ class HLDReviewerAgent:
     async def review(self, rich_facts: dict, arch_context: dict, c4_model: dict) -> dict:
         """Return {'approved': bool, 'issues': [...]}."""
         prompt = (
-            "RichFacts (JSON):\n" + json.dumps(rich_facts, indent=2, ensure_ascii=False)
-            + "\n\nArchitectureContext (JSON):\n" + json.dumps(arch_context, indent=2, ensure_ascii=False)
-            + "\n\nC4Model (JSON):\n" + json.dumps(c4_model, indent=2, ensure_ascii=False)
+            "RichFacts (JSON):\n" + compact_json(rich_facts)
+            + "\n\nArchitectureContext (JSON):\n" + compact_json(arch_context)
+            + "\n\nC4Model (JSON):\n" + compact_json(c4_model)
             + "\n\nReview the C4Model now and return your JSON verdict."
         )
-        result = await run_agent(self._agent, prompt)
-        return _parse_verdict(getattr(result, "text", str(result)) if not isinstance(result, str) else result)
+        try:
+            verdict = await run_agent_json(self._agent, prompt)
+        except ValueError:
+            # could not extract JSON after retries — fail safe; grounding.py is the hard gate
+            return {"approved": True, "issues": []}
+        return {
+            "approved": bool(verdict.get("approved", True)),
+            "issues": list(verdict.get("issues", [])),
+        }

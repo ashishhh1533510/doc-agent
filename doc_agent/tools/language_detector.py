@@ -1,104 +1,75 @@
 """
-Language detection module - identifies primary and secondary languages in a repository.
-Counts file extensions and determines dominant language + all supported languages.
+Language detection for the documentation agent.
+
+Single source of truth for which languages/extensions are supported, and for
+mapping a file or a directory to language(s). Consulted by the extractor facade
+(tools/extractor.py), input_resolver (single-file validation), and the API
+error path that returns HTTP 400 for unsupported repos.
+
+Keep SUPPORTED_EXTENSIONS in sync with extractors/registry.EXTENSION_TO_LANGUAGE.
 """
 
-import os
 from pathlib import Path
-from collections import defaultdict
-from typing import Dict
+
+# The only extensions the agent can extract facts from.
+SUPPORTED_EXTENSIONS = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".cs": "csharp",
+    ".java": "java",
+}
+
+# Sorted, de-duplicated language names — handy for user-facing error messages.
+SUPPORTED_LANGUAGES = sorted(set(SUPPORTED_EXTENSIONS.values()))
+
+# Directories that never hold hand-written source worth documenting. Load-bearing:
+# generated/build output here would skew language counts and component clustering.
+SKIP_DIRS = {
+    ".venv", "venv", "env", "__pycache__", ".git", "node_modules", ".idea",
+    ".vscode", "dist", "build", ".next", "bin", "obj", "target", ".gradle",
+    "coverage", ".pytest_cache", ".mypy_cache",
+}
 
 
-class LanguageDetector:
-    """Detect programming languages in a repository by counting file extensions."""
-    
-    SUPPORTED_EXTENSIONS = {
-        ".py": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".java": "java",
-        ".cs": "csharp",
-        ".go": "go",
-    }
-    
-    EXCLUDE_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".idea", "dist", "build", ".next"}
-    
-    def __init__(self, project_root: str):
-        self.project_root = Path(project_root)
-        self.file_counts = defaultdict(int)
-        self.detected_languages = {}
-    
-    def detect(self) -> Dict[str, any]:
-        """
-        Analyze repository and detect language distribution.
-        
-        Returns:
-            {
-                "dominant": "python",  # primary language
-                "languages": {
-                    "python": 42,
-                    "typescript": 5,
-                    "javascript": 3
-                },
-                "total_files": 50,
-                "supported_languages": ["python", "typescript", "javascript"]
-            }
-        """
-        self._walk_directory()
-        
-        if not self.file_counts:
-            return {
-                "dominant": None,
-                "languages": {},
-                "total_files": 0,
-                "supported_languages": [],
-            }
-        
-        # Find dominant language
-        dominant = max(self.file_counts, key=self.file_counts.get)
-        
-        # Filter to supported languages
-        supported = {lang: count for lang, count in self.file_counts.items() if lang}
-        
-        return {
-            "dominant": dominant,
-            "languages": dict(supported),
-            "total_files": sum(self.file_counts.values()),
-            "supported_languages": list(supported.keys()),
-        }
-    
-    def _walk_directory(self) -> None:
-        """Walk directory tree and count file extensions."""
-        try:
-            for root, dirs, files in os.walk(self.project_root):
-                # Skip excluded directories
-                dirs[:] = [d for d in dirs if d not in self.EXCLUDE_DIRS]
-                
-                for file in files:
-                    ext = Path(file).suffix.lower()
-                    if ext in self.SUPPORTED_EXTENSIONS:
-                        language = self.SUPPORTED_EXTENSIONS[ext]
-                        self.file_counts[language] += 1
-        except Exception as e:
-            print(f"Error walking directory: {e}")
-    
-    def get_language_for_file(self, file_path: str) -> str:
-        """Get language name for a specific file."""
-        ext = Path(file_path).suffix.lower()
-        return self.SUPPORTED_EXTENSIONS.get(ext, None)
+def language_for_file(path) -> str | None:
+    """Return the canonical language name for a file, or None if unsupported."""
+    return SUPPORTED_EXTENSIONS.get(Path(path).suffix.lower())
 
 
-def detect_language(project_root: str) -> Dict[str, any]:
+def detect_languages(path) -> dict:
     """
-    Convenience function to detect language in a repository.
-    
-    Args:
-        project_root: Root directory of the project
-        
+    Count supported source files per language under a directory.
+
     Returns:
-        Dictionary with detected language information
+        {
+            "dominant": "<language>" | None,   # most common supported language
+            "languages": {lang: count, ...},
+            "total_files": int,
+            "supported_languages": [lang, ...],
+        }
     """
-    detector = LanguageDetector(project_root)
-    return detector.detect()
+    root = Path(path)
+    counts: dict[str, int] = {}
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        if any(part in SKIP_DIRS for part in f.parts):
+            continue
+        lang = SUPPORTED_EXTENSIONS.get(f.suffix.lower())
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+
+    if not counts:
+        return {"dominant": None, "languages": {}, "total_files": 0,
+                "supported_languages": []}
+
+    dominant = max(counts, key=counts.get)
+    return {
+        "dominant": dominant,
+        "languages": counts,
+        "total_files": sum(counts.values()),
+        "supported_languages": list(counts.keys()),
+    }

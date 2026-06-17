@@ -5,9 +5,7 @@ Always returns both keys. The pipeline decides whether to render combined, conte
 Supports a revise() method for the iteration loop in hld_pipeline.py.
 """
 
-import json
-
-from doc_agent.core.llm import build_agent, run_agent
+from doc_agent.core.llm import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect generating a High Level Design diagram.
 
@@ -289,26 +287,12 @@ MANDATORY CHECKS
 
 Respond with ONLY the JSON. No preamble, no explanation."""
 
-def _parse_model(text: str) -> dict:
-    """Strip code fence and parse JSON."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        return json.loads(cleaned)
-    except (json.JSONDecodeError, AttributeError) as e:
-        raise ValueError(f"HLDArchitectureAgent returned unparseable JSON: {text[:200]}") from e
-
-
 def _build_prompt(rich_facts: dict, arch_context: dict) -> str:
     return (
         "RichFacts (JSON):\n\n"
-        + json.dumps(rich_facts, indent=2, ensure_ascii=False)
+        + compact_json(rich_facts)
         + "\n\nArchitectureContext (JSON):\n\n"
-        + json.dumps(arch_context, indent=2, ensure_ascii=False)
+        + compact_json(arch_context)
         + "\n\nProduce the C4 JSON model now."
     )
 
@@ -321,17 +305,15 @@ class HLDArchitectureAgent:
 
     async def analyze(self, rich_facts: dict, arch_context: dict) -> dict:
         """Return C4 model dict with both 'context' and 'containers' keys."""
-        result = await run_agent(self._agent, _build_prompt(rich_facts, arch_context))
-        return _parse_model(result)
+        return await run_agent_json(self._agent, _build_prompt(rich_facts, arch_context))
 
     async def revise(self, rich_facts: dict, arch_context: dict, model: dict, issues: list[str]) -> dict:
         """Revise the C4 model based on reviewer issues."""
         prompt = (
             _build_prompt(rich_facts, arch_context)
             + "\n\nPrevious C4 model:\n"
-            + json.dumps(model, indent=2, ensure_ascii=False)
+            + compact_json(model)
             + "\n\nA reviewer found these issues:\n- " + "\n- ".join(issues)
             + "\n\nReturn a corrected C4 JSON model fixing every issue. Only the JSON, no other text."
         )
-        result = await run_agent(self._agent, prompt)
-        return _parse_model(result)
+        return await run_agent_json(self._agent, prompt)

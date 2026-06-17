@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Documentation Agent</title>
+<title>Architecture Design Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -255,14 +255,16 @@
     startOnLoad: false,
     theme: 'dark',
     securityLevel: 'loose',
-    flowchart: { useMaxWidth: true, htmlLabels: true }
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    class:     { useMaxWidth: false },
+    sequence:  { useMaxWidth: false }
   });
 </script>
 </head>
 <body>
   <header>
     <div class="logo">D</div>
-    <h1>DOCUMENTATION&nbsp;AGENT</h1>
+    <h1>ARCHITECTURE DESIGN&nbsp;AGENT</h1>
     <span class="sub" id="base-display">—</span>
   </header>
 
@@ -483,20 +485,69 @@
       const container = $("result-container");
 
       if (fmt === "mermaid") {
-        container.innerHTML = `
+        const list = (Array.isArray(parsed.diagrams) && parsed.diagrams.length)
+          ? parsed.diagrams
+          : [{ label: parsed.diagram_type || "", content: content }];
+        let html = `
           <div class="ready">
-            <div class="ready-name">✓ Mermaid diagram ready</div>
-            <div class="ready-sub">Click download to save the <code>.mmd</code> file, or view the rendered diagram below.</div>
-          </div>
-          <div class="diagram-preview-container" style="margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: auto; display: flex; justify-content: center;">
-            <pre class="mermaid" style="background:transparent; border:none; padding:0; margin:0;">${content}</pre>
-          </div>
-        `;
+            <div class="ready-name">✓ ${list.length} diagram${list.length > 1 ? "s" : ""} ready</div>
+            <div class="ready-sub">Download the primary <code>.mmd</code> file, or scroll each view below.</div>
+          </div>`;
+        list.forEach((d, i) => {
+          html += `
+            <div style="margin-top:18px">
+              <div style="font-family:var(--mono); font-size:12px; color:var(--accent); margin-bottom:6px">
+                ${(d.label || ("Diagram " + (i + 1)))}
+              </div>
+              <div class="diagram-preview-container" style="padding:16px; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:auto; max-height:70vh;">
+                <pre class="mermaid" style="background:transparent; border:none; padding:0; margin:0;">${d.content}</pre>
+              </div>
+            </div>`;
+        });
+        container.innerHTML = html;
         try {
           mermaid.run();
         } catch (e) {
           console.error("Mermaid render failed:", e);
         }
+      } else if (fmt === "plantuml") {
+        const list = (Array.isArray(parsed.diagrams) && parsed.diagrams.length)
+          ? parsed.diagrams : [];
+        const l1Count = list.filter(d => d.level === "L1").length;
+        const l2Count = list.filter(d => d.level === "L2").length;
+        let subLine = "True UML component diagram (PlantUML). Download the <code>.puml</code> source.";
+        if (l2Count > 0) {
+          subLine = `1 system overview + ${l2Count} drill-down diagram${l2Count > 1 ? "s" : ""} (PlantUML). Download the <code>.puml</code> source.`;
+        }
+        let html = `
+          <div class="ready">
+            <div class="ready-name">✓ ${list.length} diagram${list.length > 1 ? "s" : ""} ready</div>
+            <div class="ready-sub">${subLine}</div>
+          </div>`;
+        list.forEach((d, i) => {
+          const levelTag = d.level ? `<span style="font-size:10px; padding:2px 6px; border-radius:3px; background:${d.level === 'L1' ? 'var(--accent-soft)' : 'rgba(90,168,224,0.12)'}; color:${d.level === 'L1' ? 'var(--accent)' : 'var(--blue)'}; margin-right:6px">${d.level}</span>` : "";
+          const omitted = d.omitted || {};
+          let omitNote = "";
+          if (omitted.nodes || omitted.edges) {
+            const parts = [];
+            if (omitted.nodes) parts.push(`${omitted.nodes} group${omitted.nodes > 1 ? "s" : ""} folded`);
+            if (omitted.edges) parts.push(`${omitted.edges} edge${omitted.edges > 1 ? "s" : ""} omitted`);
+            omitNote = `<div style="font-size:11px; color:var(--muted); margin-top:4px">${parts.join(" · ")}</div>`;
+          }
+          if (d.image_url) {
+            html += `
+              <div style="margin-top:18px">
+                <div style="font-family:var(--mono); font-size:12px; color:var(--text); margin-bottom:4px">
+                  ${levelTag}${(d.label || d.title || ("Diagram " + (i + 1)))}
+                </div>
+                ${omitNote}
+                <div class="diagram-preview-container" style="padding:16px; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:auto; max-height:70vh; margin-top:6px">
+                  <img src="${d.image_url}" alt="${d.level || 'component'} diagram" style="max-width:100%; background:#fff; border-radius:6px"/>
+                </div>
+              </div>`;
+          }
+        });
+        container.innerHTML = html;
       } else {
         container.innerHTML = `
           <div class="ready">

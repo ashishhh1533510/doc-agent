@@ -1,6 +1,9 @@
 """API layer: exposes the documentation and codebase-QA pipelines over HTTP (FastAPI)."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from doc_agent.tools.extractor import UnsupportedLanguageError
+
 from pydantic import BaseModel
 
 from pathlib import Path
@@ -13,6 +16,11 @@ from doc_agent.workflow.lld_pipeline import run_lld
 
 
 app = FastAPI(title="Documentation Agent")
+@app.exception_handler(UnsupportedLanguageError)
+async def _unsupported_language_handler(request: Request, exc: UnsupportedLanguageError):
+    """Turn 'no supported source' into a clean 400 instead of a 500."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
 pipeline = DocumentationPipeline()
 
 # Cache one RAG index per project path so we don't re-embed on every question.
