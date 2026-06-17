@@ -615,6 +615,87 @@ def test_package_json_dep_datastore():
               str(db_labels))
 
 
+def test_consolidate_multiple_relational_to_one():
+    """Multiple relational engines (Postgres + MySQL + H2) collapse to one node."""
+    from doc_agent.tools.container_model import _consolidate_datastores
+    db_found = {
+        "PostgreSQL":        ("PostgreSQL",        "datastore"),
+        "MySQL":             ("MySQL",             "datastore"),
+        "H2 Database":       ("H2 Database",       "datastore"),
+        "Relational Database": ("Relational Database", "datastore"),
+        "Elasticsearch":     ("Elasticsearch",     "datastore"),
+    }
+    result = _consolidate_datastores(db_found)
+    relational_labels = {"PostgreSQL", "MySQL", "H2 Database", "Relational Database"}
+    relational_in_result = [l for l in result if l in relational_labels]
+    check("consolidate: exactly one relational node", len(relational_in_result) == 1,
+          str(relational_in_result))
+    check("consolidate: non-relational Elasticsearch survives",
+          "Elasticsearch" in result)
+
+
+def test_consolidate_single_concrete_engine_keeps_name():
+    """Single concrete engine (SQLite) is kept as-is; H2 test DB is dropped."""
+    from doc_agent.tools.container_model import _consolidate_datastores
+    db_found = {
+        "SQLite":    ("SQLite",    "datastore"),
+        "H2 Database": ("H2 Database", "datastore"),
+        "Relational Database": ("Relational Database", "datastore"),
+    }
+    # SQLite is NOT in the relational set, so it should survive; H2 + generic get collapsed
+    result = _consolidate_datastores(db_found)
+    check("consolidate single: SQLite kept", "SQLite" in result, str(list(result.keys())))
+    check("consolidate single: H2 removed", "H2 Database" not in result, str(list(result.keys())))
+
+
+def test_consolidate_non_relational_untouched():
+    """Redis cache and Kafka queue survive consolidation unchanged."""
+    from doc_agent.tools.container_model import _consolidate_datastores
+    db_found = {
+        "PostgreSQL": ("PostgreSQL", "datastore"),
+        "Redis":      ("Redis",      "cache"),
+        "Kafka":      ("Kafka",      "queue"),
+    }
+    result = _consolidate_datastores(db_found)
+    check("consolidate: Redis survives", "Redis" in result)
+    check("consolidate: Kafka survives", "Kafka" in result)
+    check("consolidate: PostgreSQL kept (single concrete)", "PostgreSQL" in result,
+          str(list(result.keys())))
+
+
+def test_test_suite_module_not_a_container():
+    """A pom.xml inside test-suite/ must not produce a container node."""
+    import tempfile
+    from pathlib import Path
+    from doc_agent.tools.container_model import build_container_model
+
+    with tempfile.TemporaryDirectory(prefix="doc_agent_clone_") as repo:
+        # root pom
+        Path(repo, "pom.xml").write_text("""<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <artifactId>my-app</artifactId>
+</project>""")
+        # test-suite sub-module pom
+        ts = Path(repo, "test-suite", "module")
+        ts.mkdir(parents=True)
+        (ts / "pom.xml").write_text("""<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <artifactId>my-app-test-suite</artifactId>
+</project>""")
+        # minimal Java file in test-suite so extractor has something
+        (ts / "Stub.java").write_text("public class Stub {}")
+
+        from doc_agent.tools.manifest_parser import parse_all_manifests
+        manifests = parse_all_manifests(repo)
+        # Build with an empty rich_facts to isolate the non-deployable filter
+        rf = {"files": [], "primary_language": "java", "framework": "", "frameworks": []}
+        model = build_container_model(rf, repo, repo_name="my-app", manifests=manifests)
+        labels = [c["label"] for c in model["containers"]["containers"]]
+        check("test-suite: no container from test-suite dir",
+              not any("test" in lbl.lower() and "suite" in lbl.lower() for lbl in labels),
+              str(labels))
+
+
 def main():
     cases = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for case in cases:

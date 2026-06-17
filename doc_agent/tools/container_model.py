@@ -358,6 +358,59 @@ def _scan_services(
     return found
 
 
+# ── Non-deployable module segments ───────────────────────────────────────────
+# Manifest dirs whose repo-relative path contains any of these segments are
+# build-tooling / test scaffolding, not deployable containers.
+_NON_DEPLOYABLE_SEGMENTS = frozenset({
+    "test", "tests", "test-suite", "testsuite", "integration-test",
+    "bom", "tools", "buildsrc",
+})
+
+
+def _is_non_deployable(mdir: str, repo_root_abs: str) -> bool:
+    """True if mdir is a test/build-tooling module that should not become a container."""
+    try:
+        rel = os.path.relpath(mdir, repo_root_abs).replace("\\", "/")
+        parts = {p.lower() for p in rel.replace("\\", "/").split("/")}
+        return bool(parts & _NON_DEPLOYABLE_SEGMENTS)
+    except Exception:
+        return False
+
+
+def _consolidate_datastores(db_found: dict) -> dict:
+    """Collapse multiple relational engines to a single node.
+
+    Many repos list PostgreSQL, MySQL, H2, etc. as *optional* SQL dialects — they
+    are not all running at once. Emitting N relational nodes creates an N×M edge
+    mesh that mermaid renders as a flat strip. Rules:
+      - If exactly one concrete relational engine is detected (ignoring the generic
+        "Relational Database" placeholder and the embedded/test "H2 Database"),
+        keep that engine's name.
+      - If zero or multiple concrete engines are detected, emit a single
+        "Relational Database" node.
+      - Non-relational stores (MongoDB, Elasticsearch, InfluxDB, Cassandra) and
+        caches/queues (Redis, Kafka, RabbitMQ) are left untouched.
+    """
+    _RELATIONAL = frozenset({
+        "PostgreSQL", "MySQL", "SQL Server", "Oracle",
+        "H2 Database", "Relational Database",
+    })
+    relational = {lbl: v for lbl, v in db_found.items() if lbl in _RELATIONAL}
+    non_relational = {lbl: v for lbl, v in db_found.items() if lbl not in _RELATIONAL}
+
+    if not relational:
+        return db_found
+
+    # concrete = known engines that are not the generic fallback or embedded H2
+    concrete = [lbl for lbl in relational if lbl not in ("Relational Database", "H2 Database")]
+    if len(concrete) == 1:
+        chosen = concrete[0]
+    else:
+        chosen = "Relational Database"
+
+    return {**non_relational, chosen: (chosen, "datastore")}
+
+
 def _container_label(dir_name: str, kind: str) -> str:
     """Generate a human-readable container label from the manifest directory name."""
     clean = dir_name.replace("-", " ").replace("_", " ").strip()
@@ -415,11 +468,14 @@ def build_container_model(
         key=lambda d: len(d),    # shortest first → fallback wins ties
     )
 
-    # Group every runtime file by its nearest manifest directory
+    # Group every runtime file by its nearest manifest directory,
+    # skipping test / build-tooling modules.
     units: dict[str, dict] = {}
     for mid, f in facts.items():
         fp = f.get("file", "")
         mdir = _nearest_manifest_dir(fp, manifest_dirs, repo_root_abs)
+        if _is_non_deployable(mdir, repo_root_abs):
+            continue
         if mdir not in units:
             units[mdir] = {
                 "files": [], "imports": [], "routes": [], "has_entry": False
@@ -458,6 +514,8 @@ def build_container_model(
     if not db_found and db_from_classes:
         # ORM usage detected but driver not in catalog → generic node
         db_found["Relational Database"] = ("Relational Database", "datastore")
+    # Collapse multiple relational engines to one node (avoids N×M edge hairball)
+    db_found = _consolidate_datastores(db_found)
 
     datastore_nodes = [
         {"id": _slug(lbl), "label": lbl, "kind": kind, "tech": lbl, "description": ""}
@@ -513,6 +571,17 @@ def build_container_model(
             "_has_routes": has_routes,
             "_mdir": mdir,
         })
+
+    # ── A3b: defensive container cap ─────────────────────────────────────────
+    # If fixes 1 & 2 still leave too many nodes (pathological monorepo), keep
+    # the 8 most architecturally relevant ones (most files + routes first).
+    _CONTAINER_CAP = 8
+    if len(container_nodes) > _CONTAINER_CAP:
+        container_nodes.sort(
+            key=lambda c: (c["_has_routes"], len(units.get(c["_mdir"], {}).get("files", []))),
+            reverse=True,
+        )
+        container_nodes = container_nodes[:_CONTAINER_CAP]
 
     # ── A4: actors ────────────────────────────────────────────────────────────
     any_routes = any(c["_has_routes"] for c in container_nodes) or any(
