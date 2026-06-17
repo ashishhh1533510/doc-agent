@@ -23,7 +23,13 @@ _HTTP_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
     "DeleteMapping": "DELETE", "PatchMapping": "PATCH",
 }
-_DB_ANNOS = {"Entity", "Table", "Document", "Embeddable", "MappedSuperclass"}
+_DB_ANNOS = {
+    "Entity", "Table", "Document", "Embeddable", "MappedSuperclass",
+    # MyBatis: @Mapper marks a persistence interface
+    "Mapper",
+    # Spring Data: @Repository marks a data-access bean
+    "Repository",
+}
 # JAX-RS (javax.ws.rs / jakarta.ws.rs) HTTP verb annotations.
 _JAXRS_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 

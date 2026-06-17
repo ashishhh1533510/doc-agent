@@ -17,6 +17,8 @@ from doc_agent.tools.component_clusters import slim_components, select_files, pa
 
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input
+from doc_agent.tools.manifest_parser import parse_all_manifests
+from doc_agent.workflow.hld_pipeline import _derive_repo_name
 from doc_agent.tools.output import (
     render_class_diagram, render_sequence_diagram,
     render_component_diagram, render_dependency_diagram, save_text,
@@ -128,9 +130,23 @@ async def run_lld(
     if diagram_type not in _AGENT_MAP:
         raise ValueError(f"diagram_type must be one of {list(_AGENT_MAP)}; got {diagram_type!r}")
 
+    repo_name = _derive_repo_name(project_path)
+
     with resolve_input(project_path, token) as code_dir:
         # Stage 1 — deep extraction (deterministic)
         rich_facts = extract_rich_from_directory(code_dir)
+
+        # Stage 1b — parse build manifests (dep-grounded naming + datastore detection)
+        manifests = parse_all_manifests(code_dir)
+        # Attach manifest deps as extra import signals so component discovery
+        # benefits from the same manifest-grounded detection as HLD.
+        all_manifest_deps: list[str] = []
+        for parsed in manifests.values():
+            all_manifest_deps.extend(parsed.get("dependencies") or [])
+        if all_manifest_deps:
+            rich_facts = dict(rich_facts)
+            rich_facts["manifest_deps"] = all_manifest_deps
+            rich_facts["repo_name"] = repo_name or ""
 
         # Stage 2a — architecture context (one LLM call, shared)
         slim_facts = _slim_for_lld(rich_facts)

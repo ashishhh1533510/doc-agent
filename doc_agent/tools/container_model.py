@@ -87,12 +87,29 @@ _DB_ENGINES: dict[str, tuple[str, str]] = {
     "prisma":            ("Database",          "datastore"),
     "entityframework":   ("SQL Server",        "datastore"),
     "efcore":            ("SQL Server",        "datastore"),
+    # JVM / Spring import prefixes (matched as substrings against full FQCNs)
+    "org.springframework.data": ("Relational Database", "datastore"),
+    "org.mybatis":       ("Relational Database", "datastore"),
+    "mybatis":           ("Relational Database", "datastore"),
+    "org.hibernate":     ("Relational Database", "datastore"),
+    "org.jooq":          ("Relational Database", "datastore"),
+    "org.sqlite":        ("SQLite",            "datastore"),
+    "org.xerial":        ("SQLite",            "datastore"),
+    "org.postgresql":    ("PostgreSQL",        "datastore"),
+    "com.mysql":         ("MySQL",             "datastore"),
+    "com.zaxxer.hikari": ("Relational Database", "datastore"),
+    "org.h2":            ("H2 Database",       "datastore"),
+    "com.h2database":    ("H2 Database",       "datastore"),
     # Message queues / brokers
     "kafkajs":           ("Kafka",             "queue"),
     "amqplib":           ("RabbitMQ",          "queue"),
     "bullmq":            ("Redis Queue",       "queue"),
     "pika":              ("RabbitMQ",          "queue"),
     "celery":            ("Celery Queue",      "queue"),
+    # JVM message queues
+    "org.springframework.kafka": ("Kafka",     "queue"),
+    "org.springframework.amqp":  ("RabbitMQ",  "queue"),
+    "com.rabbitmq":      ("RabbitMQ",          "queue"),
 }
 
 # ── Third-party service SDK catalog: token -> (label, kind, verb) ────────────
@@ -114,6 +131,7 @@ _SERVICE_SDKS: dict[str, tuple[str, str, str]] = {
     "firebase-admin":    ("Firebase",     "service", "uses"),
     "openai":            ("OpenAI",       "llm",     "calls"),
     "@anthropic-ai":     ("Anthropic",    "llm",     "calls"),
+    "anthropic":         ("Anthropic",    "llm",     "calls"),
     "paypal-rest-sdk":   ("PayPal",       "payment", "processes payments via"),
     "razorpay":          ("Razorpay",     "payment", "processes payments via"),
     "braintree":         ("Braintree",    "payment", "processes payments via"),
@@ -187,8 +205,109 @@ def _classify_unit(frameworks: list, has_routes: bool, has_entry: bool) -> str:
     return "service"   # safe fallback
 
 
-def _scan_db_engines(imports_flat: list[str]) -> dict[str, tuple[str, str]]:
-    """Match imports against _DB_ENGINES; return {label -> (label, kind)}."""
+# ── Manifest-coordinate fragment catalog ────────────────────────────────────
+# Matched as case-insensitive substrings against Maven "groupId:artifactId"
+# coordinates, npm package names, pip package names, NuGet package IDs, etc.
+# This catches dependencies that never show up as source-level imports (e.g.
+# JDBC drivers configured in pom.xml and loaded reflectively at runtime).
+_MANIFEST_DB_FRAGMENTS: list[tuple[str, str, str]] = [
+    # SQLite
+    ("sqlite",         "SQLite",            "datastore"),
+    ("xerial",         "SQLite",            "datastore"),
+    # PostgreSQL
+    ("postgresql",     "PostgreSQL",        "datastore"),
+    ("npgsql",         "PostgreSQL",        "datastore"),
+    ("pg",             "PostgreSQL",        "datastore"),   # Node.js pg driver (exact/prefix matched)
+    # MySQL
+    ("mysql",          "MySQL",             "datastore"),
+    # SQL Server
+    ("sqlserver",      "SQL Server",        "datastore"),
+    ("mssql",          "SQL Server",        "datastore"),
+    ("tedious",        "SQL Server",        "datastore"),
+    # MongoDB
+    ("mongodb",        "MongoDB",           "datastore"),
+    ("mongoose",       "MongoDB",           "datastore"),
+    # Redis
+    ("redis",          "Redis",             "cache"),
+    ("ioredis",        "Redis",             "cache"),
+    # Kafka
+    ("kafka",          "Kafka",             "queue"),
+    # RabbitMQ
+    ("rabbitmq",       "RabbitMQ",          "queue"),
+    ("amqp",           "RabbitMQ",          "queue"),
+    # Generic ORM / JPA / MyBatis / H2
+    ("mybatis",        "Relational Database", "datastore"),
+    ("hibernate",      "Relational Database", "datastore"),
+    ("spring-data",    "Relational Database", "datastore"),
+    ("spring.data",    "Relational Database", "datastore"),
+    ("h2database",     "H2 Database",       "datastore"),
+    (":h2",            "H2 Database",       "datastore"),
+    ("jooq",           "Relational Database", "datastore"),
+    ("liquibase",      "Relational Database", "datastore"),
+    ("flyway",         "Relational Database", "datastore"),
+    ("prisma",         "Database",          "datastore"),
+    ("typeorm",        "Relational Database", "datastore"),
+    ("sequelize",      "Relational Database", "datastore"),
+    ("sqlalchemy",     "Relational Database", "datastore"),
+    ("efcore",         "SQL Server",        "datastore"),
+    ("entityframework","SQL Server",        "datastore"),
+    # Elasticsearch
+    ("elasticsearch",  "Elasticsearch",     "datastore"),
+]
+
+_MANIFEST_SVC_FRAGMENTS: list[tuple[str, str, str, str]] = [
+    ("stripe",         "Stripe",      "payment", "processes payments via"),
+    ("sendgrid",       "SendGrid",    "email",   "sends email via"),
+    ("nodemailer",     "Email/SMTP",  "email",   "sends email via"),
+    ("twilio",         "Twilio",      "sms",     "sends SMS via"),
+    ("cloudinary",     "Cloudinary",  "media",   "stores media via"),
+    ("boto3",          "AWS",         "cloud",   "uses"),
+    ("aws-sdk",        "AWS",         "cloud",   "uses"),
+    ("amazonaws",      "AWS",         "cloud",   "uses"),
+    ("spring-cloud-aws", "AWS",       "cloud",   "uses"),
+    ("googleapis",     "Google APIs", "service", "calls"),
+    ("google-cloud",   "Google Cloud","cloud",   "uses"),
+    ("firebase",       "Firebase",    "service", "uses"),
+    ("openai",         "OpenAI",      "llm",     "calls"),
+    ("anthropic",      "Anthropic",   "llm",     "calls"),
+    ("paypal",         "PayPal",      "payment", "processes payments via"),
+    ("razorpay",       "Razorpay",    "payment", "processes payments via"),
+    ("algolia",        "Algolia",     "search",  "searches via"),
+    ("pusher",         "Pusher",      "service", "uses"),
+    ("mailgun",        "Mailgun",     "email",   "sends email via"),
+]
+
+
+def _manifest_matches(fragment: str, lowered_deps: list[str]) -> bool:
+    """True if `fragment` plausibly identifies a dependency in `lowered_deps`.
+
+    Short tokens (≤ 4 chars, e.g. "pg", "h2") use exact-or-prefix matching to
+    avoid false positives ("pg" must not match "plugin" or "page").
+    Longer tokens use substring matching (reliable because they're specific
+    enough not to collide accidentally).
+    """
+    if len(fragment) <= 4:
+        return any(
+            dep == fragment
+            or dep.startswith(fragment + "/")
+            or dep.startswith(fragment + "-")
+            or dep.startswith(fragment + ".")
+            for dep in lowered_deps
+        )
+    return any(fragment in dep for dep in lowered_deps)
+
+
+def _scan_db_engines(
+    imports_flat: list[str],
+    manifest_deps: list[str] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Match imports (and optionally manifest dependencies) against _DB_ENGINES.
+
+    Returns {label -> (label, kind)}.
+    manifest_deps are matched as case-insensitive substrings against the
+    _MANIFEST_DB_FRAGMENTS catalog — catching drivers loaded reflectively at
+    runtime and never appearing as source-level imports (e.g. sqlite-jdbc in pom.xml).
+    """
     found: dict[str, tuple[str, str]] = {}
     lowered = [i.lower() for i in imports_flat]
     for token, (label, kind) in _DB_ENGINES.items():
@@ -196,11 +315,28 @@ def _scan_db_engines(imports_flat: list[str]) -> dict[str, tuple[str, str]]:
         if any(imp == tl or imp.startswith(tl + "/") or imp.startswith(tl + ".") for imp in lowered):
             if label not in found:
                 found[label] = (label, kind)
+
+    # Also scan manifest dependency coordinates
+    if manifest_deps:
+        mdeps = [d.lower() for d in manifest_deps]
+        for fragment, label, kind in _MANIFEST_DB_FRAGMENTS:
+            if label in found:
+                continue
+            fl = fragment.lower()
+            if _manifest_matches(fl, mdeps):
+                found[label] = (label, kind)
+
     return found
 
 
-def _scan_services(imports_flat: list[str]) -> dict[str, tuple[str, str, str]]:
-    """Match imports against _SERVICE_SDKS; return {label -> (label, kind, verb)}."""
+def _scan_services(
+    imports_flat: list[str],
+    manifest_deps: list[str] | None = None,
+) -> dict[str, tuple[str, str, str]]:
+    """Match imports (and optionally manifest dependencies) against _SERVICE_SDKS.
+
+    Returns {label -> (label, kind, verb)}.
+    """
     found: dict[str, tuple[str, str, str]] = {}
     lowered = [i.lower() for i in imports_flat]
     for token, (label, kind, verb) in _SERVICE_SDKS.items():
@@ -208,6 +344,17 @@ def _scan_services(imports_flat: list[str]) -> dict[str, tuple[str, str, str]]:
         if any(imp == tl or imp.startswith(tl + "/") or imp.startswith(tl + ".") for imp in lowered):
             if label not in found:
                 found[label] = (label, kind, verb)
+
+    # Also scan manifest dependency coordinates
+    if manifest_deps:
+        mdeps = [d.lower() for d in manifest_deps]
+        for fragment, label, kind, verb in _MANIFEST_SVC_FRAGMENTS:
+            if label in found:
+                continue
+            fl = fragment.lower()
+            if _manifest_matches(fl, mdeps):
+                found[label] = (label, kind, verb)
+
     return found
 
 
@@ -234,8 +381,24 @@ def _container_label(dir_name: str, kind: str) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_container_model(rich_facts: dict, repo_root: str) -> dict:
+def build_container_model(
+    rich_facts: dict,
+    repo_root: str,
+    repo_name: str | None = None,
+    manifests: dict | None = None,
+) -> dict:
     """Deterministically build the C4 container model from repository facts.
+
+    Args:
+        rich_facts: output of extract_rich_from_directory
+        repo_root:  local directory being analysed (may be a temp clone)
+        repo_name:  display name derived from the original URL/path *before*
+                    it became a temp dir (e.g. "spring-boot-realworld-example-app").
+                    Used as the naming fallback when the manifest has no project_name
+                    and the repo_root basename is a generated temp dir name.
+        manifests:  output of parse_all_manifests(repo_root) — pre-computed so
+                    the caller does not repeat the manifest walk.  If None the
+                    naming fallback is still available via repo_name.
 
     Returns the same dict shape render_c4_combined expects, with a 'kind'
     field added to every node for shape-by-kind rendering (Change C).
@@ -279,13 +442,19 @@ def build_container_model(rich_facts: dict, repo_root: str) -> dict:
     # Flatten all imports for datastore / external-service scanning
     all_imports: list[str] = [imp for u in units.values() for imp in u["imports"]]
 
+    # Flatten manifest dependencies for manifest-coordinate scanning
+    all_manifest_deps: list[str] = []
+    if manifests:
+        for parsed in manifests.values():
+            all_manifest_deps.extend(parsed.get("dependencies") or [])
+
     # ── A2: datastores ────────────────────────────────────────────────────────
     db_from_classes = any(
         c.get("is_db_model")
         for f in facts.values()
         for c in f.get("classes", [])
     )
-    db_found = _scan_db_engines(all_imports)
+    db_found = _scan_db_engines(all_imports, manifest_deps=all_manifest_deps)
     if not db_found and db_from_classes:
         # ORM usage detected but driver not in catalog → generic node
         db_found["Relational Database"] = ("Relational Database", "datastore")
@@ -296,7 +465,7 @@ def build_container_model(rich_facts: dict, repo_root: str) -> dict:
     ]
 
     # ── A3: external systems ─────────────────────────────────────────────────
-    svc_found = _scan_services(all_imports)
+    svc_found = _scan_services(all_imports, manifest_deps=all_manifest_deps)
     external_nodes = []
     ext_verb: dict[str, str] = {}
     for label, (lbl, _kind, verb) in svc_found.items():
@@ -317,8 +486,21 @@ def build_container_model(rich_facts: dict, repo_root: str) -> dict:
         rel = os.path.relpath(mdir, repo_root_abs).replace("\\", "/")
         dir_name = Path(rel).name if rel not in (".", "") else Path(repo_root_abs).name
 
-        label = _container_label(dir_name, kind)
-        nid = _slug(dir_name) or _slug(label)
+        # Naming priority:
+        #   1. manifest project_name for this manifest dir
+        #   2. repo_name (from URL/path before any temp-clone renaming)
+        #   3. dir_name (current behaviour — may be a temp dir on deployed path)
+        display_name = dir_name
+        if manifests and mdir in manifests:
+            mn = (manifests[mdir].get("project_name") or "").strip()
+            if mn:
+                display_name = mn
+        if display_name == dir_name and repo_name and rel in (".", ""):
+            # Only use repo_name as fallback for the root unit (single-module repos)
+            display_name = repo_name
+
+        label = _container_label(display_name, kind)
+        nid = _slug(display_name) or _slug(label)
         tech = ", ".join(fws) if fws else ""
 
         container_nodes.append({

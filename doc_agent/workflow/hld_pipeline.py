@@ -17,9 +17,10 @@ import json
 from doc_agent.tools.component_clusters import select_files_stratified, budget_facts_blob
 from doc_agent.tools.architecture_model import build_system_digest
 from doc_agent.tools.extractor import extract_rich_from_directory
-from doc_agent.tools.input_resolver import resolve_input
+from doc_agent.tools.input_resolver import resolve_input, _parse_git_url, is_git_url
 from doc_agent.tools.output import render_c4_combined, save_text, strip_technology_nodes
 from doc_agent.tools.container_model import build_container_model, apply_enrichment
+from doc_agent.tools.manifest_parser import parse_all_manifests
 from doc_agent.agents.hld_enrich import HLDEnrichmentAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
 
@@ -28,6 +29,31 @@ from doc_agent.tools.diagram_validator import validate_mermaid
 _RENDERERS = {
     "combined":  render_c4_combined,
 }
+
+
+def _derive_repo_name(project_path: str) -> str | None:
+    """Return a human-readable repo name from the original project_path.
+
+    For GitHub URLs: extract the repo basename (e.g. "spring-boot-realworld-example-app").
+    For local paths: use the directory basename as-is.
+    Returns None if the path is empty or cannot be parsed.
+    """
+    if not project_path:
+        return None
+    p = project_path.strip()
+    if is_git_url(p):
+        try:
+            clone_url, _branch, _subpath, _is_file = _parse_git_url(p)
+            # clone_url ends with ".git" or bare path: take the last path segment
+            base = clone_url.rstrip("/").rsplit("/", 1)[-1]
+            return base[:-4] if base.endswith(".git") else base or None
+        except Exception:
+            return None
+    from pathlib import Path as _Path
+    try:
+        return _Path(p).resolve().name or None
+    except Exception:
+        return None
 def _slim_for_hld(rich_facts: dict, repo_root: str) -> dict:
     """Strip per-method detail the HLD agent doesn't need, keeping the prompt small.
 
@@ -95,12 +121,17 @@ async def run_hld(
     if output_type not in _RENDERERS:
         raise ValueError(f"output_type must be one of {list(_RENDERERS)}; got {output_type!r}")
 
+    repo_name = _derive_repo_name(project_path)
+
     with resolve_input(project_path, token) as code_dir:
         # Stage 1 — deep extraction (deterministic)
         rich_facts = extract_rich_from_directory(code_dir)
 
+        # Stage 1b — parse build manifests for project name + dependency list
+        manifests = parse_all_manifests(code_dir)
+
         # Stage 2 — deterministic container-level topology (no LLM, no drift)
-        model = build_container_model(rich_facts, code_dir)
+        model = build_container_model(rich_facts, code_dir, repo_name=repo_name, manifests=manifests)
 
         # Stage 2a — slim facts for enrichment context (small prompt budget)
         slim_facts = _slim_for_hld(rich_facts, code_dir)

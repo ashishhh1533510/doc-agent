@@ -404,6 +404,217 @@ def test_render_c4_external_hexagon():
 
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Manifest-grounded naming tests (fix: temp-clone-dir name regression)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_manifest_name_overrides_temp_dir():
+    """Container label must come from pom.xml <name>/<artifactId>, NOT from
+    a temp-dir name like 'doc_agent_clone_ws75e72p'."""
+    from doc_agent.tools.manifest_parser import parse_all_manifests
+
+    with tempfile.TemporaryDirectory(prefix="doc_agent_clone_") as repo_root:
+        # Simulate a single-module Spring app: pom.xml at root
+        pom = Path(repo_root, "pom.xml")
+        pom.write_text("""<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.spring</groupId>
+  <artifactId>realworld-backend</artifactId>
+  <name>Spring Boot Realworld</name>
+</project>""")
+
+        files = [
+            {
+                "file": os.path.join(repo_root, "src", "main", "Application.java"),
+                "language": "java",
+                "imports": ["org.springframework.boot.SpringApplication"],
+                "routes": [{"method": "GET", "path": "/api/articles", "handler": "list"}],
+                "classes": [],
+                "functions": [{"name": "main", "is_async": False, "signature": "main(String[])",
+                                "returns": None, "decorators": [], "routes": [], "calls": [],
+                                "docstring": None, "lineno": 1}],
+            },
+        ]
+        facts = _make_facts(files)
+        manifests = parse_all_manifests(repo_root)
+        model = build_container_model(facts, repo_root, repo_name="spring-realworld", manifests=manifests)
+        containers = model["containers"].get("containers", [])
+
+        # Must NOT contain the temp-dir fragment
+        temp_dir_name = Path(repo_root).name.lower()
+        all_labels = {c["label"].lower() for c in containers}
+        check("manifest-name: label does not contain temp-dir name",
+              not any(temp_dir_name in lbl for lbl in all_labels),
+              str(all_labels))
+
+        # Must use the manifest project name or repo_name
+        check("manifest-name: label contains 'realworld' or 'spring'",
+              any("realworld" in lbl or "spring" in lbl for lbl in all_labels),
+              str(all_labels))
+
+
+def test_repo_name_fallback_when_no_manifest_name():
+    """When pom.xml has no <name>/<artifactId>, repo_name is the fallback."""
+    from doc_agent.tools.manifest_parser import parse_all_manifests
+
+    with tempfile.TemporaryDirectory(prefix="doc_agent_clone_") as repo_root:
+        pom = Path(repo_root, "pom.xml")
+        # Minimal pom with no name/artifactId so manifest project_name will be empty
+        pom.write_text("<?xml version='1.0'?><project></project>")
+
+        files = [
+            {
+                "file": os.path.join(repo_root, "Main.java"),
+                "language": "java",
+                "imports": ["org.springframework.boot"],
+                "routes": [{"method": "POST", "path": "/users", "handler": "create"}],
+                "classes": [],
+                "functions": [{"name": "main", "is_async": False, "signature": "main()", "returns": None,
+                                "decorators": [], "routes": [], "calls": [], "docstring": None, "lineno": 1}],
+            },
+        ]
+        facts = _make_facts(files)
+        manifests = parse_all_manifests(repo_root)
+        model = build_container_model(
+            facts, repo_root,
+            repo_name="my-awesome-repo",
+            manifests=manifests,
+        )
+        containers = model["containers"].get("containers", [])
+        all_labels = {c["label"].lower() for c in containers}
+        temp_dir_name = Path(repo_root).name.lower()
+
+        check("repo_name fallback: label does not contain temp-dir name",
+              not any(temp_dir_name in lbl for lbl in all_labels),
+              str(all_labels))
+        check("repo_name fallback: label contains 'my-awesome-repo' or 'my awesome repo'",
+              any("my" in lbl and "awesome" in lbl for lbl in all_labels),
+              str(all_labels))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Manifest-dep datastore detection tests (fix: MyBatis/SQLite not detected)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_mybatis_sqlite_from_pom_deps():
+    """MyBatis + SQLite declared in pom.xml must produce a datastore node
+    even if no DB import appears in source files."""
+    from doc_agent.tools.manifest_parser import parse_all_manifests
+
+    with tempfile.TemporaryDirectory() as repo_root:
+        pom = Path(repo_root, "pom.xml")
+        pom.write_text("""<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <artifactId>realworld</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.mybatis.spring.boot</groupId>
+      <artifactId>mybatis-spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+    </dependency>
+  </dependencies>
+</project>""")
+
+        files = [
+            {
+                "file": os.path.join(repo_root, "src", "Main.java"),
+                "language": "java",
+                "imports": ["org.springframework.boot.SpringApplication"],
+                "routes": [{"method": "GET", "path": "/api/articles", "handler": "list"}],
+                "classes": [],
+                "functions": [{"name": "main", "is_async": False, "signature": "main()", "returns": None,
+                                "decorators": [], "routes": [], "calls": [], "docstring": None, "lineno": 1}],
+            },
+        ]
+        facts = _make_facts(files)
+        manifests = parse_all_manifests(repo_root)
+        model = build_container_model(facts, repo_root, manifests=manifests)
+        dbs = model["containers"].get("databases", [])
+        db_labels = {d["label"].lower() for d in dbs}
+
+        check("mybatis+sqlite pom: datastore node exists",
+              bool(dbs), str(db_labels))
+        check("mybatis+sqlite pom: SQLite or Relational Database in datastore labels",
+              any("sqlite" in lbl or "relational" in lbl for lbl in db_labels),
+              str(db_labels))
+
+        # Must also have a reads/writes edge from the container to the datastore
+        all_rels = model["containers"].get("relationships", [])
+        db_ids = {d["id"] for d in dbs}
+        has_edge = any(r.get("to") in db_ids for r in all_rels)
+        check("mybatis+sqlite pom: reads/writes edge to datastore",
+              has_edge, str(all_rels))
+
+
+def test_java_mapper_annotation_datastore():
+    """@Mapper on a Java class → is_db_model=True → datastore node appears."""
+    with tempfile.TemporaryDirectory() as repo_root:
+        Path(repo_root, "pom.xml").write_text("""<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <artifactId>myapp</artifactId>
+</project>""")
+
+        files = [
+            {
+                "file": os.path.join(repo_root, "src", "ArticleMapper.java"),
+                "language": "java",
+                "imports": ["org.apache.ibatis.annotations.Mapper"],
+                "routes": [],
+                "classes": [{"name": "ArticleMapper", "bases": [], "is_db_model": True,
+                              "docstring": None, "fields": [], "methods": [], "lineno": 1}],
+                "functions": [],
+            },
+            {
+                "file": os.path.join(repo_root, "src", "ArticleController.java"),
+                "language": "java",
+                "imports": [],
+                "routes": [{"method": "GET", "path": "/api/articles", "handler": "list"}],
+                "classes": [],
+                "functions": [],
+            },
+        ]
+        facts = _make_facts(files)
+        model = build_container_model(facts, repo_root)
+        dbs = model["containers"].get("databases", [])
+
+        check("@Mapper class: datastore node emitted via is_db_model",
+              bool(dbs), str(dbs))
+
+
+def test_package_json_dep_datastore():
+    """package.json with pg dependency → PostgreSQL datastore node via manifest scanning."""
+    from doc_agent.tools.manifest_parser import parse_all_manifests
+
+    with tempfile.TemporaryDirectory() as repo_root:
+        pj = Path(repo_root, "package.json")
+        pj.write_text('{"name":"myapi","dependencies":{"express":"*","pg":"*"}}')
+
+        files = [
+            {
+                "file": os.path.join(repo_root, "index.js"),
+                "language": "javascript",
+                "imports": ["express"],   # pg NOT imported in source — only in package.json
+                "routes": [{"method": "GET", "path": "/users", "handler": "list"}],
+                "classes": [],
+                "functions": [{"name": "main", "is_async": False, "signature": "main()", "returns": None,
+                                "decorators": [], "routes": [], "calls": [], "docstring": None, "lineno": 1}],
+            },
+        ]
+        facts = _make_facts(files)
+        manifests = parse_all_manifests(repo_root)
+        model = build_container_model(facts, repo_root, manifests=manifests)
+        dbs = model["containers"].get("databases", [])
+        db_labels = {d["label"].lower() for d in dbs}
+
+        check("package.json pg dep: PostgreSQL datastore emitted",
+              any("postgresql" in lbl or "postgres" in lbl for lbl in db_labels),
+              str(db_labels))
+
+
 def main():
     cases = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for case in cases:
