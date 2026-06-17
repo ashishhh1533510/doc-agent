@@ -5,9 +5,7 @@ Checks a C4 JSON model against RichFacts + ArchitectureContext and returns a ver
 Used by hld_pipeline.py to drive the iteration loop.
 """
 
-import json
-
-from doc_agent.core.llm import build_agent, run_agent
+from doc_agent.core.llm import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a strict HLD architecture reviewer.
 
@@ -151,32 +149,6 @@ Common failure patterns:
 Flag: "Diagram fails 5-second readability: <specific reason>"
 
 ========================================================
-CHECK 10 — COMPONENT GROUNDING (HARD)
-========================================================
-
-RichFacts includes deterministic `components` (id, files, fan_in/out, has_routes,
-has_db_models) and `component_edges` from the real import graph. Capabilities were
-required to be derived from them.
-
-Containers — for every C4Model.containers.containers[]:
-  It must trace to ≥1 component id, or to a capability whose evidence cites a
-  component id and a real file. A container matching no component and no real file
-  is INVENTED → REJECT.
-
-Relationships — for every relationship in context/containers relationships[]:
-  The endpoints' components must have a corresponding component_edge (either
-  direction), OR an endpoint is an external system / actor. A relationship with no
-  backing component_edge and no import evidence is INVENTED → REJECT.
-
-Flag: "Container '<name>' traces to no component or real file (invented)"
-Flag: "Relationship '<from>'->'<to>' has no backing component edge (invented)"
-
-Ungrounded nodes/edges are the #1 cause of generic, identical diagrams.
-This check is non-negotiable.
-
-
-
-========================================================
 OUTPUT
 ========================================================
 
@@ -192,24 +164,6 @@ Reject everything that fails this standard."""
 
 
 
-def _parse_verdict(text: str) -> dict:
-    """Strip code fence and parse JSON verdict."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        verdict = json.loads(cleaned)
-        return {
-            "approved": bool(verdict.get("approved", True)),
-            "issues": list(verdict.get("issues", [])),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        return {"approved": True, "issues": [f"(unparseable reviewer reply: {text[:80]})"]}
-
-
 class HLDReviewerAgent:
     """Checks a C4 model against RichFacts and ArchitectureContext."""
 
@@ -219,10 +173,17 @@ class HLDReviewerAgent:
     async def review(self, rich_facts: dict, arch_context: dict, c4_model: dict) -> dict:
         """Return {'approved': bool, 'issues': [...]}."""
         prompt = (
-            "RichFacts (JSON):\n" + json.dumps(rich_facts, indent=2, ensure_ascii=False)
-            + "\n\nArchitectureContext (JSON):\n" + json.dumps(arch_context, indent=2, ensure_ascii=False)
-            + "\n\nC4Model (JSON):\n" + json.dumps(c4_model, indent=2, ensure_ascii=False)
+            "RichFacts (JSON):\n" + compact_json(rich_facts)
+            + "\n\nArchitectureContext (JSON):\n" + compact_json(arch_context)
+            + "\n\nC4Model (JSON):\n" + compact_json(c4_model)
             + "\n\nReview the C4Model now and return your JSON verdict."
         )
-        result = await run_agent(self._agent, prompt)
-        return _parse_verdict(getattr(result, "text", str(result)) if not isinstance(result, str) else result)
+        try:
+            verdict = await run_agent_json(self._agent, prompt)
+        except ValueError:
+            # could not extract JSON after retries — fail safe; grounding.py is the hard gate
+            return {"approved": True, "issues": []}
+        return {
+            "approved": bool(verdict.get("approved", True)),
+            "issues": list(verdict.get("issues", [])),
+        }

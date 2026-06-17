@@ -17,3 +17,5 @@ tree-sitter-javascript
 tree-sitter-typescript
 tree-sitter-c-sharp
 tree-sitter-java
+networkx
+

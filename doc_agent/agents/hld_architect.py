@@ -5,9 +5,7 @@ Always returns both keys. The pipeline decides whether to render combined, conte
 Supports a revise() method for the iteration loop in hld_pipeline.py.
 """
 
-import json
-
-from doc_agent.core.llm import build_agent, run_agent
+from doc_agent.core.llm import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect generating a High Level Design diagram.
 
@@ -188,7 +186,7 @@ RULE 3 — ACTOR DERIVATION FROM EVIDENCE
 Derive actors from the entry point evidence in RichFacts:
 
 - If RichFacts has HTTP routes: there is a client caller
-- If RichFacts has a main/Program/index entry or a has_main_entry component: there is a developer/operator
+- If RichFacts has a __main__ or CLI entry: there is a developer/operator
 - If RichFacts has no entry points (Library/SDK): the actor is the code
   that imports this library — label it "Developer / Application"
 - If RichFacts has scheduler triggers or event consumers: the actor is a
@@ -201,7 +199,7 @@ Maximum 2 actors.
 RULE 4 — RELATIONSHIP DERIVATION FROM EVIDENCE
 ========================================================
 
-Derive relationships using only these sources:
+Derive relationships using only these two sources:
 
 SOURCE A — import_graph:
   If module A imports module B, and A and B belong to different capabilities,
@@ -210,11 +208,6 @@ SOURCE A — import_graph:
 SOURCE B — routes and call graphs:
   If a route handler in capability A calls into capability B,
   there is a relationship from A to B.
-
-SOURCE C — component_edges (PRIMARY):
-  RichFacts.component_edges lists the real weighted dependencies between
-  components. Prefer these as the backbone of containers.relationships[];
-  a relationship with no matching component_edge or import is not allowed.
 
 Apply the relationship removal test to every candidate:
   "If this relationship were removed from the diagram, would an architect
@@ -294,26 +287,12 @@ MANDATORY CHECKS
 
 Respond with ONLY the JSON. No preamble, no explanation."""
 
-def _parse_model(text: str) -> dict:
-    """Strip code fence and parse JSON."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        return json.loads(cleaned)
-    except (json.JSONDecodeError, AttributeError) as e:
-        raise ValueError(f"HLDArchitectureAgent returned unparseable JSON: {text[:200]}") from e
-
-
 def _build_prompt(rich_facts: dict, arch_context: dict) -> str:
     return (
         "RichFacts (JSON):\n\n"
-        + json.dumps(rich_facts, indent=2, ensure_ascii=False)
+        + compact_json(rich_facts)
         + "\n\nArchitectureContext (JSON):\n\n"
-        + json.dumps(arch_context, indent=2, ensure_ascii=False)
+        + compact_json(arch_context)
         + "\n\nProduce the C4 JSON model now."
     )
 
@@ -326,17 +305,15 @@ class HLDArchitectureAgent:
 
     async def analyze(self, rich_facts: dict, arch_context: dict) -> dict:
         """Return C4 model dict with both 'context' and 'containers' keys."""
-        result = await run_agent(self._agent, _build_prompt(rich_facts, arch_context))
-        return _parse_model(result)
+        return await run_agent_json(self._agent, _build_prompt(rich_facts, arch_context))
 
     async def revise(self, rich_facts: dict, arch_context: dict, model: dict, issues: list[str]) -> dict:
         """Revise the C4 model based on reviewer issues."""
         prompt = (
             _build_prompt(rich_facts, arch_context)
             + "\n\nPrevious C4 model:\n"
-            + json.dumps(model, indent=2, ensure_ascii=False)
+            + compact_json(model)
             + "\n\nA reviewer found these issues:\n- " + "\n- ".join(issues)
             + "\n\nReturn a corrected C4 JSON model fixing every issue. Only the JSON, no other text."
         )
-        result = await run_agent(self._agent, prompt)
-        return _parse_model(result)
+        return await run_agent_json(self._agent, prompt)

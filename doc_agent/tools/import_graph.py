@@ -159,18 +159,28 @@ def build_import_graph(files, repo_root) -> dict:
 # mode "module": match a whole JS module specifier (so "RegularExpressions"
 # does not match "express").
 _FRAMEWORK_SIGNS = [
+    # .NET / JVM
     ("aspnetcore", "substr", ("microsoft.aspnetcore",)),
-    ("spring", "substr", ("org.springframework",)),
-    ("nestjs", "substr", ("@nestjs",)),
-    ("express", "module", ("express",)),
-    ("fastify", "module", ("fastify",)),
-    ("nextjs", "module", ("next",)),
-    ("react", "module", ("react", "react-dom")),
-    ("fastapi", "substr", ("fastapi",)),
-    ("flask", "substr", ("flask",)),
-    ("django", "substr", ("django",)),
-    ("starlette", "substr", ("starlette",)),
-    ("tornado", "substr", ("tornado",)),
+    ("spring",     "substr", ("org.springframework",)),
+    # Node backend
+    ("nestjs",     "substr", ("@nestjs",)),
+    ("express",    "module", ("express",)),
+    ("fastify",    "module", ("fastify",)),
+    # Fullstack / meta-frameworks (single-deploy, UI+API)
+    ("nextjs",     "module", ("next",)),
+    ("remix",      "substr", ("@remix-run",)),
+    ("sveltekit",  "substr", ("@sveltejs/kit",)),
+    # UI frameworks
+    ("react",      "module", ("react", "react-dom")),
+    ("vue",        "module", ("vue",)),
+    ("angular",    "substr", ("@angular/core",)),
+    ("svelte",     "module", ("svelte",)),
+    # Python backend
+    ("fastapi",    "substr", ("fastapi",)),
+    ("flask",      "substr", ("flask",)),
+    ("django",     "substr", ("django",)),
+    ("starlette",  "substr", ("starlette",)),
+    ("tornado",    "substr", ("tornado",)),
 ]
 
 

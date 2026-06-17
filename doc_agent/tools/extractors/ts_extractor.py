@@ -26,6 +26,10 @@ _HTTP_DECORATORS = {"Get", "Post", "Put", "Patch", "Delete", "Head", "Options", 
 _EXPRESS_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "all"}
 # Class decorators that mark an ORM/DB model.
 _DB_DECORATORS = {"Entity", "Schema", "Table", "ViewEntity"}
+# Base class names that mark a Sequelize model (class X extends Model {}).
+_DB_BASES = {"Model"}
+# Call method names that define a persistence model (mongoose.model / sequelize.define / db.collection).
+_MODEL_CALLS = {"model", "define", "collection"}
 
 _CLASS_TYPES = {"class_declaration", "abstract_class_declaration"}
 _METHOD_TYPES = {"method_definition", "method_signature"}
@@ -210,13 +214,22 @@ def _describe_field(node) -> dict:
 
 
 def _class_bases(class_node) -> list:
-    """extends + implements (and interface `extends`) base names."""
+    """extends + implements (and interface `extends`) base names.
+
+    TypeScript grammar wraps bases in extends_clause/implements_clause children
+    of class_heritage. JavaScript grammar puts the base identifier directly inside
+    class_heritage with no wrapping clause. Handle both."""
     bases = []
     for c in class_node.children:
         if c.type == "class_heritage":
+            has_clause = False
             for clause in c.children:
                 if clause.type in ("extends_clause", "implements_clause"):
+                    has_clause = True
                     bases.extend(base.node_text(t) for t in clause.named_children)
+            if not has_clause:
+                # JS grammar: identifier sits directly in class_heritage
+                bases.extend(base.node_text(t) for t in c.named_children)
         elif c.type in ("extends_clause", "implements_clause", "extends_type_clause"):
             bases.extend(base.node_text(t) for t in c.named_children)
     return bases
@@ -225,7 +238,11 @@ def _class_bases(class_node) -> list:
 def _describe_class(name, class_node, decorators, doc) -> dict:
     """FileFacts class dict (same shape as python_extractor)."""
     dec_names = [_decorator_info(d)[0] for d in decorators]
-    is_db_model = any(dn in _DB_DECORATORS for dn in dec_names)
+    is_db_model = (
+        any(dn in _DB_DECORATORS for dn in dec_names)
+        or any(b.split("<")[0].split(".")[-1].strip() in _DB_BASES
+               for b in _class_bases(class_node))
+    )
 
     controller_prefix = None
     for d in decorators:
@@ -281,23 +298,53 @@ def _import_sources(node) -> list:
     return [base.node_text(frag) if frag else base.node_text(src).strip("'\"`")]
 
 
-def _express_routes(node) -> list:
-    """app.get('/x', ...) / router.post(...) style routes from an expression_statement."""
-    expr = node.named_children[0] if node.named_children else None
-    if expr is None or expr.type != "call_expression":
-        return []
-    callee = expr.child_by_field_name("function")
-    if callee is None or callee.type != "member_expression":
-        return []
-    prop = callee.child_by_field_name("property")
-    method = base.node_text(prop).lower()
-    if method not in _EXPRESS_METHODS:
-        return []
-    path = _first_string_arg(expr.child_by_field_name("arguments"))
-    if not path:
-        return []
-    obj = callee.child_by_field_name("object")
-    return [base.make_route(method.upper(), path, base.node_text(obj), _lineno(node))]
+def _express_routes(root) -> list:
+    """Express/Fastify routes found ANYWHERE in the file (nested in functions,
+    module.exports, etc.): app.get('/x', handler) / router.post('/y', h).
+    Requires a string path that looks like a route AND a handler arg, so
+    Map.get('k') / cache.get('k') / app.get('env') (no slash or one arg) are
+    not mistaken for routes."""
+    routes = []
+    for n in base.walk(root):
+        if n.type != "call_expression":
+            continue
+        callee = n.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            continue
+        method = base.node_text(callee.child_by_field_name("property")).lower()
+        if method not in _EXPRESS_METHODS:
+            continue
+        args = n.child_by_field_name("arguments")
+        if args is None or len(args.named_children) < 2:        # need path + handler
+            continue
+        path = _first_string_arg(args)
+        if not path.startswith("/"):                            # routes are path-like
+            continue
+        obj = callee.child_by_field_name("object")
+        routes.append(base.make_route(method.upper(), path, base.node_text(obj), _lineno(n)))
+    return routes
+
+def _synthetic_models(root, existing: set) -> list:
+    """Persistence expressed as CALLS, not decorated classes:
+    mongoose.model('User', s), sequelize.define('User', {...}), db.collection('users').
+    Each becomes a minimal is_db_model class so the HLD persistence signal fires for
+    ORM-less / convention-based code (e.g. NodeGoat's native MongoDB DAOs)."""
+    out, seen = [], set()
+    for n in base.walk(root):
+        if n.type != "call_expression":
+            continue
+        callee = n.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            continue
+        if base.node_text(callee.child_by_field_name("property")) not in _MODEL_CALLS:
+            continue
+        name = _first_string_arg(n.child_by_field_name("arguments"))
+        if not name or name in existing or name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "bases": [], "is_db_model": True,
+                    "docstring": None, "fields": [], "methods": [], "lineno": _lineno(n)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +417,11 @@ def extract_from_typescript_source(source: str, filename: str, grammar: str = "t
             handle_declaration(node, list(pending_decorators), pending_doc)
         elif t in ("lexical_declaration", "variable_declaration"):
             handle_declaration(node, list(pending_decorators), pending_doc)
-        elif t == "expression_statement":
-            routes.extend(_express_routes(node))
 
         pending_doc, pending_decorators = None, []
+
+    routes.extend(_express_routes(root))
+    classes.extend(_synthetic_models(root, {c["name"] for c in classes}))
 
     return {
         "file": filename,

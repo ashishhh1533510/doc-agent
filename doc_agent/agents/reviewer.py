@@ -7,7 +7,7 @@ either approved, or a list of specific issues for the writer to fix.
 
 import json
 
-from doc_agent.core.llm import build_agent
+from doc_agent.core.llm import build_agent, run_agent_json
 
 INSTRUCTIONS = """You are a meticulous documentation reviewer. You are given:
 1. The ground-truth facts about a codebase, as JSON.
@@ -26,25 +26,6 @@ or
 Approve only if there are no hallucinations or inaccuracies. Minor wording differences are fine."""
 
 
-def _parse_verdict(text: str) -> dict:
-    """Pull the JSON verdict out of the reply, tolerating ```json code fences."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        verdict = json.loads(cleaned)
-        return {
-            "approved": bool(verdict.get("approved", True)),
-            "issues": list(verdict.get("issues", [])),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        # If we can't parse a verdict, don't loop forever -- accept what we have.
-        return {"approved": True, "issues": [f"(unparseable reviewer reply: {text[:80]})"]}
-
-
 class ReviewerAgent:
     """An LLM agent that fact-checks a README against extracted facts."""
 
@@ -58,5 +39,12 @@ class ReviewerAgent:
             + "\n\nGENERATED README:\n" + readme
             + "\n\nReview it now and return your JSON verdict."
         )
-        result = await self._agent.run(prompt)
-        return _parse_verdict(getattr(result, "text", str(result)))
+        try:
+            verdict = await run_agent_json(self._agent, prompt)
+        except ValueError:
+            # could not parse a verdict after retries — accept what we have, don't loop
+            return {"approved": True, "issues": []}
+        return {
+            "approved": bool(verdict.get("approved", True)),
+            "issues": list(verdict.get("issues", [])),
+        }

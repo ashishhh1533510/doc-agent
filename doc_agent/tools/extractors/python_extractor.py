@@ -60,6 +60,9 @@ _ROUTE_RE = re.compile(
     r'[\w.]+\.(' + '|'.join(_ROUTE_METHODS) + r')\(["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
+# Flask/Blueprint: @app.route('/x', methods=['GET', 'POST']) / @bp.route('/x')
+_FLASK_ROUTE_RE = re.compile(r'[\w.]+\.route\(["\']([^"\']+)["\']')
+_METHODS_RE = re.compile(r'methods\s*=\s*\[([^\]]*)\]')
 
 
 def _describe_function(node) -> dict:
@@ -76,6 +79,21 @@ def _describe_function(node) -> dict:
                 "handler": node.name,
                 "lineno": node.lineno,
             })
+            continue
+        fm = _FLASK_ROUTE_RE.match(raw)
+        if fm:
+            mm = _METHODS_RE.search(raw)
+            methods = (
+                [t.strip().strip("'\"").upper() for t in mm.group(1).split(",") if t.strip()]
+                if mm else ["GET"]
+            )
+            for meth in methods or ["GET"]:
+                routes.append({
+                    "method": meth,
+                    "path": fm.group(1),
+                    "handler": node.name,
+                    "lineno": node.lineno,
+                })
 
     calls = []
     for n in ast.walk(node):
@@ -167,6 +185,34 @@ def _extract_imports(tree: ast.Module) -> list[str]:
     return unique
 
 
+_DJANGO_ROUTE_FUNCS = {"path", "re_path", "url"}
+
+
+def _django_routes(tree: ast.Module) -> list:
+    """Routes from a module-level `urlpatterns = [path('x/', view), ...]` list."""
+    routes = []
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign) else [])
+        if not any(isinstance(t, ast.Name) and t.id == "urlpatterns" for t in targets):
+            continue
+        for n in ast.walk(node):
+            if (isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name)
+                    and n.func.id in _DJANGO_ROUTE_FUNCS
+                    and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and isinstance(n.args[0].value, str)):
+                handler = ast.unparse(n.args[1]) if len(n.args) > 1 else "view"
+                routes.append({
+                    "method": "GET",
+                    "path": n.args[0].value,
+                    "handler": handler,
+                    "lineno": getattr(n, "lineno", 0),
+                })
+    return routes
+
+
 def extract_from_python_source(source: str, filename: str = "<unknown>") -> dict:
     """Parse Python source text and return its FileFacts."""
     tree = ast.parse(source, filename=filename)
@@ -178,6 +224,7 @@ def extract_from_python_source(source: str, filename: str = "<unknown>") -> dict
             routes.extend(func.get("routes", []))
         elif isinstance(node, ast.ClassDef):
             classes.append(_describe_class(node))
+    routes.extend(_django_routes(tree))
     return {
         "file": filename,
         "language": "python",      # NEW: FileFacts now records its language

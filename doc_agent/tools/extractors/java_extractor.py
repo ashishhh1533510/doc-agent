@@ -24,6 +24,8 @@ _HTTP_MAPPINGS = {
     "DeleteMapping": "DELETE", "PatchMapping": "PATCH",
 }
 _DB_ANNOS = {"Entity", "Table", "Document", "Embeddable", "MappedSuperclass"}
+# JAX-RS (javax.ws.rs / jakarta.ws.rs) HTTP verb annotations.
+_JAXRS_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 
 _CLASS_TYPES = {
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -148,6 +150,17 @@ def _describe_method(node, controller_prefix, doc) -> dict:
             routes.append(base.make_route(
                 _HTTP_MAPPINGS[an], _join_route(controller_prefix, _anno_string(a)),
                 name, _lineno(node)))
+    # JAX-RS: collect @GET/@POST/... and optional @Path from this method's annotations.
+    jaxrs_verb, method_path = None, None
+    for a in _annotations(node):
+        an = _anno_name(a)
+        if an in _JAXRS_METHODS:
+            jaxrs_verb = an
+        elif an == "Path":
+            method_path = _anno_string(a)
+    if jaxrs_verb:
+        routes.append(base.make_route(
+            jaxrs_verb, _join_route(controller_prefix, method_path), name, _lineno(node)))
     rtype = node.child_by_field_name("type")
     return {
         "name": name,
@@ -186,7 +199,7 @@ def _describe_class(node, doc) -> dict:
 
     controller_prefix = None
     for a in annos:
-        if _anno_name(a) == "RequestMapping":
+        if _anno_name(a) in ("RequestMapping", "Path"):
             controller_prefix = _anno_string(a)
 
     body = (node.child_by_field_name("body")

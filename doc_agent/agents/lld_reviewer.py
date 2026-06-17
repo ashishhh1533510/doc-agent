@@ -8,7 +8,7 @@ Used by lld_pipeline.py to drive the iteration loop.
 
 import json
 
-from doc_agent.core.llm import build_agent, run_agent
+from doc_agent.core.llm import build_agent, run_agent_json
 
 INSTRUCTIONS = """You are a meticulous architecture reviewer specialising in LLD diagrams.
 You are given four inputs:
@@ -57,24 +57,6 @@ or
 {"approved": false, "issues": ["specific problem 1", "specific problem 2"]}"""
 
 
-def _parse_verdict(text: str) -> dict:
-    """Strip code fence and parse JSON verdict."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        verdict = json.loads(cleaned)
-        return {
-            "approved": bool(verdict.get("approved", True)),
-            "issues": list(verdict.get("issues", [])),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        return {"approved": True, "issues": [f"(unparseable reviewer reply: {text[:80]})"]}
-
-
 class LLDReviewerAgent:
     """Checks an LLD model against RichFacts and ArchitectureContext."""
 
@@ -90,5 +72,12 @@ class LLDReviewerAgent:
             + f"\n\ndiagram_type: {diagram_type}"
             + "\n\nReview the LLDModel now and return your JSON verdict."
         )
-        result = await run_agent(self._agent, prompt)
-        return _parse_verdict(getattr(result, "text", str(result)) if not isinstance(result, str) else result)
+        try:
+            verdict = await run_agent_json(self._agent, prompt)
+        except ValueError:
+            # could not extract JSON after retries — fail safe; grounding.py is the hard gate
+            return {"approved": True, "issues": []}
+        return {
+            "approved": bool(verdict.get("approved", True)),
+            "issues": list(verdict.get("issues", [])),
+        }

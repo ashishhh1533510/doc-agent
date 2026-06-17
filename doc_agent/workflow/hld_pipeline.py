@@ -1,32 +1,55 @@
 """
-HLD pipeline: deep extraction → architecture context → C4 model → review loop → render.
+HLD pipeline: deep extraction → deterministic container model → LLM enrichment → render.
 
 output_type controls what gets rendered:
   "combined"   → C4 Context + C4 Container (the only supported output)
+
+Pipeline shape (post Change D):
+  facts → build_container_model (deterministic node-set)
+        → HLDEnrichmentAgent   (text-only: system_purpose, descriptions, edge labels)
+        → apply_enrichment     (merge by id — structural invention is discarded)
+        → strip_technology_nodes (guard)
+        → render_c4_combined   (shape-by-kind)
+        → validate_mermaid
 """
 
 import json
-from doc_agent.tools.component_clusters import slim_components
+from doc_agent.tools.component_clusters import select_files_stratified, budget_facts_blob
+from doc_agent.tools.architecture_model import build_system_digest
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input
-from doc_agent.tools.output import render_c4_combined, save_text
-from doc_agent.agents.arch_context import ArchitectureContextAgent
-from doc_agent.agents.hld_architect import HLDArchitectureAgent
-from doc_agent.agents.hld_reviewer import HLDReviewerAgent
+from doc_agent.tools.output import render_c4_combined, save_text, strip_technology_nodes
+from doc_agent.tools.container_model import build_container_model, apply_enrichment
+from doc_agent.agents.hld_enrich import HLDEnrichmentAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
-from doc_agent.workflow.grounding import check_grounding
 
 
 
 _RENDERERS = {
     "combined":  render_c4_combined,
 }
-def _slim_for_hld(rich_facts: dict) -> dict:
+def _slim_for_hld(rich_facts: dict, repo_root: str) -> dict:
     """Strip per-method detail the HLD agent doesn't need, keeping the prompt small.
-    Carries the deterministic components/edges/pattern so the agent must ground
-    its diagram in them instead of inventing generic shape."""
+
+    HLD discovers runtime *containers* (web/API hosts, services, persistence,
+    datastores, external systems) from entry/route/persistence evidence. It must
+    NOT be fed the import-graph component-clustering model (components/edges/
+    architecture_signals) — that is the LLD/component-diagram model, and feeding it
+    here collapses runtime containers into source-code business capabilities (the
+    regression this avoids). Routes + is_db_model on the per-file list are the
+    signals the container/datastore discovery needs.
+
+    system_digest is a whole-repo, one-row-per-area structural summary (see
+    build_system_digest) — it is the breadth signal that keeps a large repo's
+    full set of areas visible to the agent regardless of the file cap below.
+
+    File cap keeps the per-minute token budget low; select_files_stratified takes
+    the most architecturally-relevant files from EVERY area first (then fills any
+    remaining budget by global relevance), so no single dense area can monopolize
+    the sample and hide the rest of the system (the regression this avoids)."""
+    selected, omitted = select_files_stratified(rich_facts.get("files", []), repo_root, per_area=4, cap=40)
     slim_files = []
-    for f in rich_facts.get("files", []):
+    for f in selected:
         slim_files.append({
             "file": f.get("file"),
             "imports": f.get("imports", []),
@@ -36,17 +59,17 @@ def _slim_for_hld(rich_facts: dict) -> dict:
                 for c in f.get("classes", [])
             ],
         })
-    return {
+    blob = {
         "primary_language": rich_facts.get("primary_language"),
         "framework": rich_facts.get("framework"),
         "frameworks": rich_facts.get("frameworks", []),
         "languages": rich_facts.get("languages"),
-        "architecture_signals": rich_facts.get("architecture_signals", {}),
-        "components": slim_components(rich_facts.get("components", [])),
-        "component_edges": rich_facts.get("edges", []),
+        "system_digest": build_system_digest(rich_facts, repo_root),
         "import_graph": rich_facts.get("import_graph", {}),
         "files": slim_files,
+        "files_omitted": omitted,
     }
+    return budget_facts_blob(blob)
 
 
 
@@ -55,7 +78,7 @@ async def run_hld(
     output_type: str = "combined",
     output_path: str | None = None,
     token: str | None = None,
-    max_rounds: int = 2,
+    max_rounds: int = 2,   # kept for API compatibility; not used in new pipeline
 ) -> dict:
     """
     Run the HLD pipeline for a project and return the Mermaid diagram.
@@ -64,8 +87,8 @@ async def run_hld(
         {
             "output_type": str,
             "content": str,          # Mermaid text
-            "arch_context": dict,    # repo-specific insights (for debugging)
-            "review_trace": [...],   # per-round reviewer verdicts
+            "arch_context": dict,    # enrichment output (for debugging)
+            "review_trace": [...],   # always [] in new pipeline
             "saved_to": str | None,
         }
     """
@@ -76,36 +99,24 @@ async def run_hld(
         # Stage 1 — deep extraction (deterministic)
         rich_facts = extract_rich_from_directory(code_dir)
 
-        # Stage 2a — architecture context (one LLM call, shared)
-        slim_facts = _slim_for_hld(rich_facts)
-        arch_ctx = await ArchitectureContextAgent().analyze(slim_facts)
+        # Stage 2 — deterministic container-level topology (no LLM, no drift)
+        model = build_container_model(rich_facts, code_dir)
 
+        # Stage 2a — slim facts for enrichment context (small prompt budget)
+        slim_facts = _slim_for_hld(rich_facts, code_dir)
 
-        # Stage 2b + review loop
-        hld_agent = HLDArchitectureAgent()
-        reviewer  = HLDReviewerAgent()
+        # Stage 2b — LLM enrichment (text only: system_purpose, descriptions, labels)
+        enrichment = await HLDEnrichmentAgent().enrich(model, slim_facts)
+        model = apply_enrichment(model, enrichment)
 
-        model = await hld_agent.analyze(slim_facts, arch_ctx)
-        trace = []
+        # Stage 2c — remove framework/library nodes that are technology metadata,
+        # not C4 architecture nodes (guard against library boxes leaking in).
+        model = strip_technology_nodes(model, slim_facts.get("frameworks"))
+        # Note: collapse_layers is NOT called — the deterministic node-set has no
+        # architectural-layer boxes to collapse. resolve_floating_externals is also
+        # not needed — all relationships are wired deterministically in Stage 2.
 
-        for round_num in range(1, max_rounds + 1):
-            verdict = await reviewer.review(slim_facts, arch_ctx, model)
-            ground_issues = check_grounding(model, slim_facts, arch_ctx)
-            if ground_issues:
-                verdict["approved"] = False
-                verdict["issues"] = verdict.get("issues", []) + ground_issues
-            trace.append({
-                "round": round_num,
-                "approved": verdict["approved"],
-                "issues": verdict["issues"],
-            })
-            if verdict["approved"]:
-                break
-            model = await hld_agent.revise(slim_facts, arch_ctx, model, verdict["issues"])
-
-
-
-        # Stage 3 — deterministic rendering
+        # Stage 3 — deterministic rendering (shape-by-kind)
         content = _RENDERERS[output_type](model)
 
         # Stage 4 — syntax validation
@@ -114,8 +125,8 @@ async def run_hld(
         result = {
             "output_type": output_type,
             "content": content,
-            "arch_context": arch_ctx,
-            "review_trace": trace,
+            "arch_context": enrichment,   # enrichment dict for debugging
+            "review_trace": [],
             "validation": validation,
             "saved_to": None,
         }

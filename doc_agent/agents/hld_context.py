@@ -1,9 +1,15 @@
 """
-Architecture Context Agent: repo-specific insights extracted before any diagram agent runs.
+HLD Context Agent: repo-specific architectural context for the HLD pipeline ONLY.
 
-Reads RichFacts and answers: what pattern is this repo, what are the actual named components,
-which workflows matter, what tech stack, what constraints. Output is passed to both HLD and
-LLD agents so every diagram is grounded in this repo's real structure, not a generic template.
+This is the container-level discovery used by the C4 Context/Container diagrams. It
+asks "what runtime containers, datastores, actors, and external systems exist?" and
+deliberately does NOT ground capabilities in the import-graph component-clustering
+model — that model answers a different (LLD/component) question and, when used here,
+collapses runtime containers into source-code business capabilities.
+
+Kept separate from agents/arch_context.py (the component-grounded context shared by
+the LLD pipeline) so the two architecture models stay independent: changing one must
+never change the other. See workflow/hld_pipeline.py.
 """
 
 from doc_agent.core.llm import build_agent, run_agent_json, compact_json
@@ -13,44 +19,28 @@ INSTRUCTIONS = """You are a software architect analyzing an unfamiliar codebase.
 You receive RichFacts — static analysis output: file paths, imports, classes,
 routes, call graphs, and module relationships.
 
+RichFacts.system_digest is a whole-repository structural map: ONE ROW PER
+TOP-LEVEL ARCHITECTURAL AREA (e.g. Catalog.API, Basket.API, Ordering.API), not
+per file. It is computed deterministically from every runtime file in the repo,
+so it is COMPLETE even when RichFacts.files below has been sampled down to fit
+the prompt budget. Treat system_digest as the authoritative map of what exists
+in this system. RichFacts.files is illustrative evidence for NAMING and DETAIL
+only — a file's absence from that sample is NOT evidence that its area doesn't
+exist or doesn't matter. If system_digest lists an area with non-trivial
+route_count, db_model_count, or file_count that has no corresponding file in
+RichFacts.files, you must still account for that area using system_digest's
+own fields (sample_routes, sample_classes, external_imports, languages).
+
 You have NO prior knowledge of what this system is.
 You must discover the architecture purely from the evidence.
-
-========================================================
-PHASE 0 — COMPONENT GROUNDING (READ FIRST, OVERRIDES ALL)
-========================================================
-
-RichFacts includes deterministic inputs computed from the real import graph
-(NOT by you). Treat them as GROUND TRUTH you must build on:
-
-- `components`: each has id, files, languages, fan_in, fan_out, has_routes,
-  has_db_models, has_main_entry, file_count.
-- `architecture_signals`: {pattern, evidence} — the detected architecture pattern.
-- `component_edges`: real weighted dependencies between components.
-
-HARD RULES (a downstream automated check enforces these — violations are REJECTED):
-
-1. Every capability MUST be built from one or more of these component ids. You MAY
-   merge several components into one capability with a responsibility-based name.
-   You may NOT invent a capability mapping to no component, and you may NOT output
-   more capabilities than there are components.
-2. Each capability's `evidence` MUST cite at least one component id AND one real
-   file path from that component's `files`.
-3. Use the metrics for scoring: high fan_in ⇒ foundational/shared; high fan_out ⇒
-   orchestrator/entry; has_routes ⇒ communication boundary; has_db_models ⇒
-   persistence; has_main_entry ⇒ entry point.
-4. Capability relationships MUST trace to `component_edges` or import_graph.
-
-Phases 1–8 below still apply, but they SCORE, MERGE, and NAME the GIVEN components —
-they never invent new structure. The system's shape is already fixed by the
-components; your job is to name and compress them well.
-
 
 ========================================================
 PHASE 1 — EVIDENCE INVENTORY
 ========================================================
 
-Read all RichFacts. List what you observe:
+Read all RichFacts, starting from system_digest — it is the ground truth for
+which areas exist; RichFacts.files supplies extra detail for the areas it
+covers. List what you observe:
 
 a) Entry points: any routes, __main__, CLI entry points, public API surface
 b) External dependencies: imports that are not this repo's own modules
@@ -58,6 +48,7 @@ c) Data structures: classes, their bases, their fields
 d) Communication patterns: any HTTP, message queue, socket, or RPC usage
 e) Processing stages: any pipeline, workflow, or transformation sequences
 f) Persistence patterns: any file I/O, database ORM, in-memory store
+g) Every area in system_digest, even ones with no file-level detail below
 
 Do not name any architectural patterns yet.
 Just list what the evidence contains.
@@ -76,6 +67,14 @@ Rules for grouping:
 - Files that exist for the same reason belong in the same concern
 - One file can only belong to one concern (assign to the dominant reason)
 - Do NOT name the concerns yet
+- WHOLE-SYSTEM COVERAGE: every area listed in system_digest must map into at
+  least one concern at this stage — either as its own concern or explicitly
+  folded into a concern it clearly supports. Never silently drop an area
+  because it lacked detail in RichFacts.files; system_digest's own fields
+  (route_count, db_model_count, sample_routes, sample_classes) are sufficient
+  evidence to place it. The diagram you ultimately produce must describe the
+  whole system in system_digest, not the single area with the most file-level
+  detail.
 
 You should have between 4 and 12 raw concerns at this stage.
 
@@ -421,14 +420,12 @@ OUTPUT FORMAT
   "pattern": "<style>",
   "node_budget": <integer from Phase 5 budget range — use the midpoint>,
   "capabilities": [
-      {
+    {
       "name": "<concern name from Phase 6>",
       "role": "<one sentence: what architectural function this serves>",
-      "evidence": ["<component id>", "<real file path from that component>"],
-      "component_ids": ["<component id this capability is built from>"],
+      "evidence": ["<file path or class that is part of this concern>"],
       "score": <integer 7-10 after merging>
     }
-
   ],
   "external_systems": [
     {
@@ -468,10 +465,11 @@ Before outputting, verify:
 ✓ Every capability name passes the responsibility test (describes what, not how)
 ✓ No capability name contains a framework or library name as its primary identifier
 ✓ primary_workflow contains 2–5 entries, all present in capabilities[].name
-✓ Every capability has a non-empty component_ids drawn from RichFacts.components
-✓ capabilities[] count ≤ number of components in RichFacts.components
-✓ Every capability's evidence cites a component id and a real file path
-
+✓ Every architecturally-significant area in system_digest (non-trivial
+   route_count, db_model_count, or file_count) is reachable from at least one
+   capability's evidence — either as its own capability or explicitly merged
+   into one. The capabilities[] list as a whole must describe the system
+   system_digest reports, not just the area RichFacts.files happened to sample.
 
 Respond with ONLY the JSON. No preamble, no explanation."""
 
@@ -479,11 +477,11 @@ Respond with ONLY the JSON. No preamble, no explanation."""
 
 
 
-class ArchitectureContextAgent:
-    """Extracts repo-specific architectural context from RichFacts (one call per pipeline run)."""
+class HLDContextAgent:
+    """Extracts container-level architectural context from RichFacts for the HLD pipeline."""
 
     def __init__(self):
-        self._agent = build_agent(instructions=INSTRUCTIONS, name="ArchContext")
+        self._agent = build_agent(instructions=INSTRUCTIONS, name="HLDContext")
 
     async def analyze(self, rich_facts: dict) -> dict:
         """Return ArchitectureContext dict grounded in the provided RichFacts."""
