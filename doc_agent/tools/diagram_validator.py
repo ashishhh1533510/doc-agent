@@ -36,8 +36,18 @@ _ARROW_BY_TYPE = {
 
 
 def _detect_type(text: str) -> str | None:
-    """Return the diagram type keyword from the first token, or None."""
-    first = text.strip().split()[0] if text.strip() else ""
+    """Return the diagram type keyword from the first content token, or None.
+
+    Leading Mermaid directive lines (``%%{init: ...}%%``) and blank lines are
+    skipped — they legally precede the diagram-type keyword.
+    """
+    first = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("%%"):
+            continue
+        first = s.split()[0]
+        break
     for dt in _DIAGRAM_TYPES:
         if first.startswith(dt):
             return dt

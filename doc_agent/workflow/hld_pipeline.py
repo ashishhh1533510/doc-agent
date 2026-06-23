@@ -1,50 +1,77 @@
-"""
-HLD pipeline: deep extraction → deterministic container model → LLM enrichment → render.
+﻿"""
+HLD pipeline v4: C4 Combined (Context + Container) architecture synthesis.
 
-output_type controls what gets rendered:
-  "combined"   → C4 Context + C4 Container (the only supported output)
+Produces exactly ONE diagram that merges the C4 Context and Container viewpoints
+into a single hierarchical picture — readable by a CXO or newcomer to the code.
 
-Pipeline shape (post Change D):
-  facts → build_container_model (deterministic node-set)
-        → HLDEnrichmentAgent   (text-only: system_purpose, descriptions, edge labels)
-        → apply_enrichment     (merge by id — structural invention is discarded)
-        → strip_technology_nodes (guard)
-        → render_c4_combined   (shape-by-kind)
-        → validate_mermaid
+Pipeline shape:
+  Stage 1  - deterministic candidate model
+               build_candidate_model → merge_orchestration
+               → infer_communication_graph → infer_entrypoint
+               → synthesize_architecture_backbone (guarantee connectivity)
+  Stage 2  - slim facts for LLM (capped, stratified)
+  Stage 3  - HLDGroundedArchitect: classifies/labels candidates, assigns domains
+  Stage 4  - guardrails + readability passes
+               apply_grounding → apply_enrichment → strip_technology_nodes
+               → enforce_c4_levels → assign_architecture_layers
+               → drop_operational_noise → assign_domains
+               → reduce_edges_for_readability → curate_significant_edges
+               → assign_container_roles
+  Stage 5  - one faithful combined diagram (render_c4_combined)
+
+output_type: "combined" (the only supported value)
 """
 
 import json
+import logging
+
 from doc_agent.tools.component_clusters import select_files_stratified, budget_facts_blob
 from doc_agent.tools.architecture_model import build_system_digest
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input, _parse_git_url, is_git_url
-from doc_agent.tools.output import render_c4_combined, save_text, strip_technology_nodes
-from doc_agent.tools.container_model import build_container_model, apply_enrichment
+from doc_agent.tools.output import (
+    render_c4_combined,
+    save_text,
+    strip_technology_nodes,
+)
+from doc_agent.tools.container_model import (
+    build_candidate_model,
+    apply_grounding,
+    apply_enrichment,
+    enforce_c4_levels,
+    discover_orchestration,
+    merge_orchestration,
+    infer_communication_graph,
+    infer_entrypoint,
+    synthesize_architecture_backbone,
+    enforce_narrative_spine,
+    enforce_connectivity,
+    assign_architecture_layers,
+    drop_operational_noise,
+    assign_domains,
+    reduce_edges_for_readability,
+    curate_significant_edges,
+    assign_container_roles,
+    validate_model,
+)
 from doc_agent.tools.manifest_parser import parse_all_manifests
-from doc_agent.agents.hld_enrich import HLDEnrichmentAgent
+from doc_agent.agents.hld_grounded_architect import HLDGroundedArchitect
 from doc_agent.tools.diagram_validator import validate_mermaid
 
-
+log = logging.getLogger(__name__)
 
 _RENDERERS = {
-    "combined":  render_c4_combined,
+    "combined": render_c4_combined,
 }
 
 
 def _derive_repo_name(project_path: str) -> str | None:
-    """Return a human-readable repo name from the original project_path.
-
-    For GitHub URLs: extract the repo basename (e.g. "spring-boot-realworld-example-app").
-    For local paths: use the directory basename as-is.
-    Returns None if the path is empty or cannot be parsed.
-    """
     if not project_path:
         return None
     p = project_path.strip()
     if is_git_url(p):
         try:
             clone_url, _branch, _subpath, _is_file = _parse_git_url(p)
-            # clone_url ends with ".git" or bare path: take the last path segment
             base = clone_url.rstrip("/").rsplit("/", 1)[-1]
             return base[:-4] if base.endswith(".git") else base or None
         except Exception:
@@ -54,25 +81,10 @@ def _derive_repo_name(project_path: str) -> str | None:
         return _Path(p).resolve().name or None
     except Exception:
         return None
+
+
 def _slim_for_hld(rich_facts: dict, repo_root: str) -> dict:
-    """Strip per-method detail the HLD agent doesn't need, keeping the prompt small.
-
-    HLD discovers runtime *containers* (web/API hosts, services, persistence,
-    datastores, external systems) from entry/route/persistence evidence. It must
-    NOT be fed the import-graph component-clustering model (components/edges/
-    architecture_signals) — that is the LLD/component-diagram model, and feeding it
-    here collapses runtime containers into source-code business capabilities (the
-    regression this avoids). Routes + is_db_model on the per-file list are the
-    signals the container/datastore discovery needs.
-
-    system_digest is a whole-repo, one-row-per-area structural summary (see
-    build_system_digest) — it is the breadth signal that keeps a large repo's
-    full set of areas visible to the agent regardless of the file cap below.
-
-    File cap keeps the per-minute token budget low; select_files_stratified takes
-    the most architecturally-relevant files from EVERY area first (then fills any
-    remaining budget by global relevance), so no single dense area can monopolize
-    the sample and hide the rest of the system (the regression this avoids)."""
+    """Strip per-method detail the HLD agent doesn't need."""
     selected, omitted = select_files_stratified(rich_facts.get("files", []), repo_root, per_area=4, cap=40)
     slim_files = []
     for f in selected:
@@ -95,8 +107,19 @@ def _slim_for_hld(rich_facts: dict, repo_root: str) -> dict:
         "files": slim_files,
         "files_omitted": omitted,
     }
-    return budget_facts_blob(blob)
+    # Tight ceiling: dense code/JSON tokenizes nearer len/3 than len/4, so keep the
+    # facts blob small enough that candidate_model + facts + instructions stays well
+    # under the Gemini free-tier 250k input-tokens/minute quota in a single call.
+    return budget_facts_blob(blob, max_tokens=70_000)
 
+
+def _view(type_: str, label: str, content: str) -> dict:
+    return {
+        "type": type_,
+        "label": label,
+        "content": content,
+        "validation": validate_mermaid(content),
+    }
 
 
 async def run_hld(
@@ -104,18 +127,22 @@ async def run_hld(
     output_type: str = "combined",
     output_path: str | None = None,
     token: str | None = None,
-    max_rounds: int = 2,   # kept for API compatibility; not used in new pipeline
+    max_rounds: int = 2,
 ) -> dict:
     """
-    Run the HLD pipeline for a project and return the Mermaid diagram.
+    Run the HLD pipeline (v4 native C4, spec §3 escalation) for a project.
 
     Returns:
         {
-            "output_type": str,
-            "content": str,          # Mermaid text
-            "arch_context": dict,    # enrichment output (for debugging)
-            "review_trace": [...],   # always [] in new pipeline
-            "saved_to": str | None,
+            "output_type":  str,
+            "content":      str,          # first diagram content (backward compat)
+            "diagrams":     [
+                {"type": str, "label": str, "content": str, "validation": dict},
+                ...
+            ],
+            "arch_context": dict,
+            "review_trace": [],
+            "saved_to":     str | None,
         }
     """
     if output_type not in _RENDERERS:
@@ -124,42 +151,79 @@ async def run_hld(
     repo_name = _derive_repo_name(project_path)
 
     with resolve_input(project_path, token) as code_dir:
-        # Stage 1 — deep extraction (deterministic)
-        rich_facts = extract_rich_from_directory(code_dir)
+        # ── Stage 1: Deterministic candidate model ────────────────────────────
+        rich_facts    = extract_rich_from_directory(code_dir)
+        manifests     = parse_all_manifests(code_dir)
+        orchestration = discover_orchestration(code_dir)
+        model         = build_candidate_model(
+            rich_facts, code_dir, repo_name=repo_name, manifests=manifests,
+            orchestration=orchestration,  # evidence fusion — nodes only
+        )
+        model         = merge_orchestration(model, orchestration)     # adds nodes only
+        model         = infer_communication_graph(model, rich_facts, orchestration)  # all edges
+        model         = infer_entrypoint(model)                       # actor→entrypoint
+        model         = synthesize_architecture_backbone(model)       # guarantee connectivity
+        model         = enforce_narrative_spine(model)                # primary path, immune to thinning
 
-        # Stage 1b — parse build manifests for project name + dependency list
-        manifests = parse_all_manifests(code_dir)
-
-        # Stage 2 — deterministic container-level topology (no LLM, no drift)
-        model = build_container_model(rich_facts, code_dir, repo_name=repo_name, manifests=manifests)
-
-        # Stage 2a — slim facts for enrichment context (small prompt budget)
+        # ── Stage 2: Slim facts for LLM ───────────────────────────────────────
         slim_facts = _slim_for_hld(rich_facts, code_dir)
 
-        # Stage 2b — LLM enrichment (text only: system_purpose, descriptions, labels)
-        enrichment = await HLDEnrichmentAgent().enrich(model, slim_facts)
+        # ── Stage 3: Grounded LLM architect ──────────────────────────────────
+        enrichment = await HLDGroundedArchitect().classify(model, slim_facts)
+
+        # ── Stage 4: Guardrails + architectural validation ────────────────────
+        model = apply_grounding(model, model)
         model = apply_enrichment(model, enrichment)
-
-        # Stage 2c — remove framework/library nodes that are technology metadata,
-        # not C4 architecture nodes (guard against library boxes leaking in).
         model = strip_technology_nodes(model, slim_facts.get("frameworks"))
-        # Note: collapse_layers is NOT called — the deterministic node-set has no
-        # architectural-layer boxes to collapse. resolve_floating_externals is also
-        # not needed — all relationships are wired deterministically in Stage 2.
+        model = enforce_c4_levels(model)
+        model = assign_architecture_layers(model)      # layer field for tiered rendering
+        model = drop_operational_noise(model)          # remove load-gen / telemetry nodes
+        model = assign_domains(model)                  # ensure every container has a group
+        model = reduce_edges_for_readability(model)    # transitive reduction + collapse
+        model = curate_significant_edges(model)        # per-source fan-out cap (redundant-only)
+        model = enforce_connectivity(model)            # R2-R5 repair: no floating subsystems
+        model = assign_container_roles(model)          # persist node["role"] (ingress face)
 
-        # Stage 3 — deterministic rendering (shape-by-kind)
-        content = _RENDERERS[output_type](model)
+        validation_report = validate_model(model)
+        if not validation_report["passed"]:
+            for finding in validation_report["findings"]:
+                log.warning("HLD validation [%s]: %s", finding["level"], finding["message"])
+        else:
+            for finding in validation_report["findings"]:
+                log.info("HLD validation [%s]: %s", finding["level"], finding["message"])
 
-        # Stage 4 — syntax validation
-        validation = validate_mermaid(content)
+        # ── Stage 5: one faithful combined diagram ────────────────────────────
+        sys_label = (
+            model.get("containers", {}).get("system_label")
+            or model.get("context", {}).get("system_name")
+            or "System"
+        )
+        diagram_content = render_c4_combined(model)
+        diagrams = [_view("combined", f"{sys_label} - Containers", diagram_content)]
+
+        # Completeness guard — log any model entity id absent from the rendered output
+        all_ids = (
+            [c["id"] for c in model.get("containers", {}).get("containers", [])]
+            + [d["id"] for d in model.get("containers", {}).get("databases", [])]
+            + [e["id"] for e in model.get("containers", {}).get("external_services", [])]
+            + [a["id"] for a in model.get("context", {}).get("actors", [])]
+        )
+        missing = [eid for eid in all_ids if eid not in diagram_content]
+        if missing:
+            log.warning("HLD coverage: %d entity ids absent from diagram: %s", len(missing), missing)
+
+        content = diagrams[0]["content"] if diagrams else ""
 
         result = {
-            "output_type": output_type,
-            "content": content,
-            "arch_context": enrichment,   # enrichment dict for debugging
-            "review_trace": [],
-            "validation": validation,
-            "saved_to": None,
+            "output_type":        output_type,
+            "content":            content,
+            "diagrams":           diagrams,
+            "arch_context":       enrichment,
+            "review_trace":       [],
+            "validation":         diagrams[0]["validation"] if diagrams else {},
+            "validation_report":  validation_report,
+            "coverage":           {"missing_ids": missing},
+            "saved_to":           None,
         }
 
         if output_path and content:
@@ -168,10 +232,7 @@ async def run_hld(
         return result
 
 
-
-
-
-# Quick test: python -m doc_agent.workflow.hld_pipeline <project_path> [combined|context|container]
+# Quick test: python -m doc_agent.workflow.hld_pipeline <project_path> [combined]
 if __name__ == "__main__":
     import asyncio
     import sys
@@ -179,8 +240,10 @@ if __name__ == "__main__":
     project = sys.argv[1] if len(sys.argv) > 1 else "doc_agent"
     otype   = sys.argv[2] if len(sys.argv) > 2 else "combined"
     out = asyncio.run(run_hld(project, otype))
-    print(out["content"])
+    print(f"=== {len(out.get('diagrams', []))} diagram(s) ===")
+    for d in out.get("diagrams", []):
+        print(f"\n--- [{d['type']}] {d['label']} ---")
+        print(d["content"])
+        print("validation:", d["validation"])
     print("\n--- ArchitectureContext ---")
     print(json.dumps(out["arch_context"], indent=2))
-    print("\n--- Review Trace ---")
-    print(json.dumps(out["review_trace"], indent=2))

@@ -42,6 +42,108 @@ def _skip_path(parts: tuple) -> bool:
 # Per-format parsers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pom_is_deployable(path: Path) -> bool:
+    """True if this pom.xml has a Spring Boot plugin or war packaging (bootable artifact)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "spring-boot-maven-plugin" in text:
+            return True
+        if "<packaging>war</packaging>" in text:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _gradle_is_deployable(path: Path) -> bool:
+    """True if this build.gradle(.kts) has a Spring Boot or application plugin (bootable).
+
+    Ignores 'apply false' version-pin lines (BOM / platform catalog usage) — a root
+    build.gradle that declares 'id ... apply false' is only a version lock, not an
+    applied plugin, so it must NOT be treated as a bootable entry point.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # bootJar / bootRun task references always mean the boot plugin is active
+        if "bootJar" in text or "bootRun" in text:
+            return True
+        for line in text.splitlines():
+            stripped = line.strip()
+            if "apply false" in stripped:
+                continue  # version pin — not an applied plugin, skip
+            if "org.springframework.boot" in stripped:
+                return True
+        # Gradle 'application' plugin marks an executable distribution
+        for line in text.splitlines():
+            stripped = line.strip()
+            if "apply false" in stripped:
+                continue
+            if re.search(r"""['"]application['"]""", stripped) or "id('application')" in stripped or 'id("application")' in stripped:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _package_json_is_deployable(path: Path) -> bool:
+    """True if this package.json has a start script, bin field, or server-side framework dep."""
+    _SERVER_DEPS = {
+        "express", "fastify", "nestjs", "@nestjs/core", "koa", "hapi", "@hapi/hapi",
+        "next", "remix", "@remix-run/node", "sveltekit", "@sveltejs/kit",
+        "nuxt", "@nuxt/kit",
+    }
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        scripts = data.get("scripts") or {}
+        if any(k in scripts for k in ("start", "serve", "dev")):
+            return True
+        if data.get("bin"):
+            return True
+        all_deps = set((data.get("dependencies") or {}).keys()) | set((data.get("devDependencies") or {}).keys())
+        if all_deps & _SERVER_DEPS:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _pyproject_is_deployable(path: Path) -> bool:
+    """True if this pyproject.toml/setup.py has scripts or a web-server dep."""
+    _SERVER_DEPS = {
+        "fastapi", "flask", "django", "uvicorn", "gunicorn", "starlette",
+        "tornado", "aiohttp", "quart", "sanic",
+    }
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "[project.scripts]" in text or "console_scripts" in text or "[tool.poetry.scripts]" in text:
+            return True
+        for dep in _SERVER_DEPS:
+            if re.search(rf'(?i)["\']?{re.escape(dep)}["\']?\s*[=\[]', text):
+                return True
+        # Also check sibling requirements.txt
+        req = path.parent / "requirements.txt"
+        if req.exists():
+            req_text = req.read_text(encoding="utf-8", errors="replace").lower()
+            if any(dep in req_text for dep in _SERVER_DEPS):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _csproj_is_deployable(path: Path) -> bool:
+    """True if this .csproj targets an executable or web/worker SDK."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "<OutputType>Exe" in text or "<OutputType>exe" in text:
+            return True
+        if "Microsoft.NET.Sdk.Web" in text or "Microsoft.NET.Sdk.Worker" in text:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _parse_pom(path: Path) -> dict:
     try:
         import xml.etree.ElementTree as ET
@@ -73,9 +175,10 @@ def _parse_pom(path: Path) -> dict:
                 a = (aid.text or "").strip()
                 if g and a:
                     deps.append(f"{g}:{a}")
-        return {"project_name": name, "dependencies": deps, "language": "java"}
+        deployable = _pom_is_deployable(path)
+        return {"project_name": name, "dependencies": deps, "language": "java", "deployable": deployable}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "java"}
+        return {"project_name": "", "dependencies": [], "language": "java", "deployable": False}
 
 
 def _parse_package_json(path: Path) -> dict:
@@ -83,9 +186,10 @@ def _parse_package_json(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         name = (data.get("name") or "").strip()
         deps = list(data.get("dependencies", {}).keys()) + list(data.get("devDependencies", {}).keys())
-        return {"project_name": name, "dependencies": deps, "language": "javascript"}
+        deployable = _package_json_is_deployable(path)
+        return {"project_name": name, "dependencies": deps, "language": "javascript", "deployable": deployable}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "javascript"}
+        return {"project_name": "", "dependencies": [], "language": "javascript", "deployable": False}
 
 
 def _parse_pyproject(path: Path) -> dict:
@@ -123,12 +227,14 @@ def _parse_pyproject(path: Path) -> dict:
                     if pkg:
                         deps.append(pkg)
 
-        return {"project_name": name, "dependencies": list(dict.fromkeys(deps)), "language": "python"}
+        deployable = _pyproject_is_deployable(path)
+        return {"project_name": name, "dependencies": list(dict.fromkeys(deps)), "language": "python", "deployable": deployable}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "python"}
+        return {"project_name": "", "dependencies": [], "language": "python", "deployable": False}
 
 
 def _parse_requirements_txt(path: Path) -> dict:
+    _SERVER_DEPS = {"fastapi", "flask", "django", "uvicorn", "gunicorn", "starlette", "tornado", "aiohttp"}
     try:
         deps = []
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -137,9 +243,10 @@ def _parse_requirements_txt(path: Path) -> dict:
                 pkg = re.split(r"[>=<!;#\s]", line)[0]
                 if pkg:
                     deps.append(pkg)
-        return {"project_name": "", "dependencies": deps, "language": "python"}
+        deployable = any(d.lower() in _SERVER_DEPS for d in deps)
+        return {"project_name": "", "dependencies": deps, "language": "python", "deployable": deployable}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "python"}
+        return {"project_name": "", "dependencies": [], "language": "python", "deployable": False}
 
 
 def _parse_csproj(path: Path) -> dict:
@@ -153,9 +260,10 @@ def _parse_csproj(path: Path) -> dict:
             include = ref.get("Include") or ref.get("include") or ""
             if include:
                 deps.append(include.strip())
-        return {"project_name": name, "dependencies": deps, "language": "csharp"}
+        deployable = _csproj_is_deployable(path)
+        return {"project_name": name, "dependencies": deps, "language": "csharp", "deployable": deployable}
     except Exception:
-        return {"project_name": path.stem, "dependencies": [], "language": "csharp"}
+        return {"project_name": path.stem, "dependencies": [], "language": "csharp", "deployable": False}
 
 
 def _parse_go_mod(path: Path) -> dict:
@@ -166,9 +274,12 @@ def _parse_go_mod(path: Path) -> dict:
         if m:
             name = m.group(1).rsplit("/", 1)[-1]
         deps = re.findall(r'^\s+(\S+)\s+v[\d.]+', text, re.MULTILINE)
-        return {"project_name": name, "dependencies": deps, "language": "go"}
+        # go.mod deployability is determined by whether any file in the module has
+        # package main; we set a neutral True here and let _has_entry (from
+        # architecture_model) act as the gate in container_model's pass 2.
+        return {"project_name": name, "dependencies": deps, "language": "go", "deployable": True}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "go"}
+        return {"project_name": "", "dependencies": [], "language": "go", "deployable": False}
 
 
 def _parse_gradle(path: Path) -> dict:
@@ -196,9 +307,10 @@ def _parse_gradle(path: Path) -> dict:
                 if len(parts) >= 2:
                     deps.append(f"{parts[0]}:{parts[1]}")
 
-        return {"project_name": name, "dependencies": deps, "language": "java"}
+        deployable = _gradle_is_deployable(path)
+        return {"project_name": name, "dependencies": deps, "language": "java", "deployable": deployable}
     except Exception:
-        return {"project_name": "", "dependencies": [], "language": "java"}
+        return {"project_name": "", "dependencies": [], "language": "java", "deployable": False}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,8 +339,8 @@ def parse_manifest(path: str) -> dict:
         return _parse_go_mod(p)
     if p.suffix.lower() in (".csproj", ".fsproj"):
         return _parse_csproj(p)
-    # Unknown manifest type — return empty
-    return {"project_name": "", "dependencies": [], "language": "unknown"}
+    # Unknown manifest type — return empty (not deployable)
+    return {"project_name": "", "dependencies": [], "language": "unknown", "deployable": False}
 
 
 def parse_all_manifests(repo_root: str) -> dict[str, dict]:
@@ -264,14 +376,19 @@ def parse_all_manifests(repo_root: str) -> dict[str, dict]:
         else:
             # Keep the richer of the two results for the same directory
             existing = result[dir_abs]
+            # deployable: True wins (either manifest signals bootable)
+            is_deployable = existing.get("deployable", False) or parsed.get("deployable", False)
             if len(parsed.get("dependencies", [])) > len(existing.get("dependencies", [])):
                 # Merge: prefer the one with more deps; keep the non-empty name
                 result[dir_abs] = {
                     "project_name": existing.get("project_name") or parsed.get("project_name", ""),
                     "dependencies": parsed["dependencies"],
                     "language": parsed.get("language") or existing.get("language", ""),
+                    "deployable": is_deployable,
                 }
-            elif not existing.get("project_name") and parsed.get("project_name"):
-                result[dir_abs]["project_name"] = parsed["project_name"]
+            else:
+                if not existing.get("project_name") and parsed.get("project_name"):
+                    result[dir_abs]["project_name"] = parsed["project_name"]
+                result[dir_abs]["deployable"] = is_deployable
 
     return result

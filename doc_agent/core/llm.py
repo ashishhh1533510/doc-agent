@@ -21,7 +21,7 @@ EMBED_MODEL = "gemini-embedding-001"
 
 # Free-tier quota is 250k input tokens/minute; target a safety margin under it so
 # we pace ourselves before Gemini ever has to reject a call.
-_INPUT_TPM_BUDGET = 200_000
+_INPUT_TPM_BUDGET = 180_000
 _PROMPT_OVERHEAD_TOKENS = 4_000  # system instructions + framework overhead per call
 _MAX_CONCURRENT_CALLS = 3
 
@@ -49,6 +49,16 @@ class _RateLimiter:
     async def acquire(self, tokens: int):
         await self._semaphore.acquire()
         async with self._lock:
+            # A single call larger than the whole budget can never "fit"; pacing
+            # cannot help it. Wait only for the window to drain to empty, then let
+            # it through and rely on the 429 retry/backoff rather than hang forever.
+            if tokens >= self._budget:
+                now = asyncio.get_event_loop().time()
+                while self._prune(now) > 0:
+                    await asyncio.sleep(min(self._usage[0][0] + 60.0 - now, 5.0))
+                    now = asyncio.get_event_loop().time()
+                self._usage.append((now, tokens))
+                return
             while True:
                 now = asyncio.get_event_loop().time()
                 used = self._prune(now)
@@ -67,8 +77,13 @@ _rate_limiter = _RateLimiter(_INPUT_TPM_BUDGET)
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate (~4 chars/token), same heuristic used elsewhere."""
-    return len(text) // 4 + _PROMPT_OVERHEAD_TOKENS
+    """Conservative token estimate (~3 chars/token).
+
+    Code and compact JSON tokenize denser than prose; the optimistic 4-chars/token
+    heuristic undercounts and lets a call slip over the free-tier per-minute quota.
+    Using 3 keeps the rate limiter on the safe side.
+    """
+    return len(text) // 3 + _PROMPT_OVERHEAD_TOKENS
 
 
 def build_agent(instructions: str, name: str):
@@ -201,12 +216,14 @@ def extract_json(text: str) -> str:
     return s
 
 
-async def run_agent_json(agent, prompt: str, max_retries: int = 3, base_delay: float = 0.5):
+async def run_agent_json(agent, prompt: str, max_retries: int = 3, base_delay: float = 0.5,
+                         fallback=None):
     """Run an agent and parse its reply as JSON, retrying when it isn't valid.
 
     Small models (e.g. gemini-flash-lite) occasionally answer the prompt in prose
     instead of JSON. We salvage a buried JSON block first; if that fails we retry
-    with a stronger JSON-only instruction. Raises ValueError after `max_retries`.
+    with a stronger JSON-only instruction. Raises ValueError after `max_retries`
+    unless `fallback` is provided, in which case `fallback` is returned instead.
     """
     last_text = ""
     attempt_prompt = prompt
@@ -223,6 +240,8 @@ async def run_agent_json(agent, prompt: str, max_retries: int = 3, base_delay: f
                     "markdown fences, no phase-by-phase analysis."
                 )
                 await asyncio.sleep(base_delay)
+    if fallback is not None:
+        return fallback
     raise ValueError(
         f"Agent did not return valid JSON after {max_retries} attempts: {last_text[:200]}"
     )

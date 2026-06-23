@@ -1,4 +1,4 @@
-"""
+﻿"""
 Output tool: render generated documentation into different formats and save it.
 
 md / html   -> prose (html is converted from markdown)
@@ -498,6 +498,33 @@ _SHAPE_BY_KIND = {
     "external":  "hex",
 }
 
+# ── Per-kind color palette (deterministic, repo-agnostic) ─────────────────────
+# Each kind maps to a CSS class name; classDefs are emitted once per diagram in
+# _CLASSDEFS. external uses the pre-existing `ext` class. Adding a kind is one
+# entry here + one matching classDef line below.
+_CLASS_BY_KIND = {
+    "person":    "actor",
+    "web_app":   "webapp",
+    "service":   "service",
+    "worker":    "worker",
+    "datastore": "data",
+    "cache":     "data",
+    "queue":     "queue",
+    "external":  "ext",
+}
+
+# classDef lines emitted once per diagram. Soft fills + saturated strokes so the
+# diagram reads like a designed reference graphic regardless of repo shape.
+_CLASSDEFS = [
+    "classDef actor   fill:#eceff1,stroke:#607d8b,color:#263238",
+    "classDef webapp  fill:#e3f2fd,stroke:#1976d2,color:#0d47a1",
+    "classDef service fill:#e0f2f1,stroke:#00897b,color:#004d40",
+    "classDef worker  fill:#f3e5f5,stroke:#8e24aa,color:#4a148c",
+    "classDef data    fill:#fff3e0,stroke:#f57c00,color:#e65100",
+    "classDef queue   fill:#fce4ec,stroke:#d81b60,color:#880e4f",
+    "classDef ext     fill:#f5f5f5,stroke:#999,color:#333",
+]
+
 
 def _emit_node(nid: str, label: str, kind: str, tech: str = "", indent: str = "    ") -> str:
     """Return a Mermaid flowchart node line with the correct shape for its kind.
@@ -522,25 +549,278 @@ def _emit_node(nid: str, label: str, kind: str, tech: str = "", indent: str = " 
     else:  # rect — default for web_app, service, worker, and unknown kinds
         node = f'{nid}["{display}"]'
 
+    # Tag with a per-kind CSS class for deterministic color-coding (see _CLASSDEFS).
+    cls = _CLASS_BY_KIND.get(kind)
+    if cls:
+        return f'{indent}{node}:::{cls}'
     return f'{indent}{node}'
 
 
-def render_c4_combined(model: dict) -> str:
-    """Render HLD as a flowchart TD with a named system boundary subgraph.
+# ── Tier taxonomy for hierarchical rendering ──────────────────────────────────
+# Maps node kind → tier name. Extensible: append to TIER_ORDER for new tiers.
+# These are hierarchy metadata; Mermaid controls actual visual layout.
+_KIND_TO_TIER = {
+    "person":    "Actors",
+    "web_app":   "Applications",
+    "service":   "Services",
+    "worker":    "Workers",
+    "datastore": "Data Stores",
+    "cache":     "Data Stores",
+    "queue":     "Messaging",
+    "external":  "External Systems",
+}
 
-    Visual hierarchy:
-      Actor(s)
-          ↓
-      [system_purpose boundary]
-          containers / datastores inside (shaped by kind)
-          ↓
-      External systems (outside, hexagons)
+# Maps the deterministic layer field (set by assign_architecture_layers) → tier name.
+# Takes priority over _KIND_TO_TIER when a node carries a layer field.
+_LAYER_TO_TIER = {
+    "presentation": "Clients",
+    "gateway":      "API Gateway",
+    "application":  "Services",
+    "worker":       "Workers",
+    "data":         "Data Stores",
+    "messaging":    "Messaging",
+}
+
+# Order in which tiers are emitted inside (and outside) the system boundary.
+# "Clients" and "API Gateway" precede "Services" to produce a top-down flow:
+# Actor → Clients → API Gateway → Services → Workers → Data Stores
+# "Applications" is kept for backward-compat (web_app nodes without a layer).
+TIER_ORDER = [
+    "Actors",
+    "External Systems",
+    "Clients",
+    "API Gateway",
+    "Applications",
+    "Services",
+    "Workers",
+    "Data Stores",
+    "Messaging",
+]
+
+# Tiers rendered inside the system boundary subgraph
+_INTERNAL_TIERS = {"Clients", "API Gateway", "Applications", "Services", "Workers", "Data Stores", "Messaging"}
+
+
+# ── HLD flowchart renderer (system-boundary subgraph) ─────────────────────────
+
+_LAYER_RANK = {
+    "presentation": 0,
+    "gateway":      1,
+    "application":  2,
+    "worker":       3,
+    "data":         4,
+    "messaging":    5,
+}
+
+_KIND_RANK = {
+    "web_app": 0,
+    "service": 2,
+    "worker":  3,
+    "datastore": 4,
+    "cache":   4,
+    "queue":   5,
+}
+
+
+def _render_flowchart_combined(model: dict) -> str:
+    """Render HLD as a flowchart TD with a system boundary subgraph.
+
+    When containers carry a 'group' field (set by assign_domains), renders domain
+    subgraphs ordered entry-first with datastores nested in their owner's domain.
+    Falls back to layer-tier subgraphs when no 'group' fields are present.
+
+    Architecture (domain mode):
+      Actors (outside, stadium shape)
+      subgraph SYS — system boundary
+          subgraph <Domain A>  (entry domain first)
+          subgraph <Domain B>
+          ...
+      External Systems (outside, hexagons) — only those with ≥1 relationship
+
+    Architecture (tier mode — backward-compatible):
+      Actors (outside, stadium shape)
+      subgraph SYS — system boundary
+          subgraph Applications  (web_app nodes)
+          subgraph Services      (service / worker nodes)
+          subgraph Data Stores   (datastore / cache nodes)
+          subgraph Messaging     (queue nodes)
+      External Systems (outside, hexagons) — only those with ≥1 relationship
     """
     ctx  = model.get("context", {})
     cont = model.get("containers", {})
 
-    # Prefer containers.system_label (set to system_purpose by enrichment agent).
-    # Fall back to context.system_name for backward compatibility.
+    system_label = (
+        cont.get("system_label")
+        or ctx.get("system_name")
+        or "System"
+    )
+
+    all_rels_flat = (ctx.get("relationships") or []) + (cont.get("relationships") or [])
+
+    # Determine which external ids are connected (participate in ≥1 relationship)
+    rel_endpoints: set[str] = set()
+    for r in all_rels_flat:
+        rel_endpoints.add(_slug(r.get("from", "")))
+        rel_endpoints.add(_slug(r.get("to", "")))
+
+    all_externals = (
+        list(ctx.get("external_systems", []))
+        + list(cont.get("external_services", []))
+    )
+    # Deduplicate externals by slug id
+    seen_ext_ids: set[str] = set()
+    deduped_externals: list[dict] = []
+    for ext in all_externals:
+        eid = _slug(ext["id"])
+        if eid not in seen_ext_ids:
+            seen_ext_ids.add(eid)
+            deduped_externals.append(ext)
+
+    # Only render externals that participate in at least one relationship
+    connected_externals = [e for e in deduped_externals if _slug(e["id"]) in rel_endpoints]
+
+    lines = [
+        "%%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':40,'rankSpacing':55,'padding':12}}}%%",
+        "flowchart TD",
+    ]
+    lines.append("")
+
+    # ── Actors (outside SYS) ─────────────────────────────────────────────────
+    actor_ids: list[str] = []
+    for a in ctx.get("actors", []):
+        aid = _slug(a["id"])
+        actor_ids.append(aid)
+        lines.append(_emit_node(aid, a["label"], a.get("kind", "person"), indent="    "))
+
+    if actor_ids:
+        lines.append("")
+
+    # ── System boundary (the only subgraph; strict flat Container view inside) ──
+    # SYS is uppercase; _slug lowercases all node ids, so it cannot collide.
+    safe_sys = system_label.replace('"', "'")
+    lines.append(f'    subgraph SYS["{safe_sys}"]')
+    lines.append("    direction TB")
+
+    cap_ids: list[str] = []
+
+    # ── Layered Container view: group deployable units into horizontal lanes ───
+    # Each node is bucketed into a tier by its architecture `layer` (falling back
+    # to its `kind`), then lanes are emitted top-down in TIER_ORDER inside the SYS
+    # boundary. Lane membership is derived metadata the model already assigns —
+    # repo-agnostic, no fabricated nodes (a monolith yields a single lane).
+    all_containers = cont.get("containers", [])
+
+    def _node_rank(node: dict) -> int:
+        layer = node.get("layer", "")
+        if layer in _LAYER_RANK:
+            return _LAYER_RANK[layer]
+        return _KIND_RANK.get(node.get("kind", "service"), 2)
+
+    def _tier_of(node: dict) -> str:
+        layer = node.get("layer", "")
+        if layer in _LAYER_TO_TIER:
+            return _LAYER_TO_TIER[layer]
+        return _KIND_TO_TIER.get(node.get("kind", "service"), "Services")
+
+    # Collect all nodes that render inside the boundary (containers + connected
+    # datastores/caches/queues), bucketed by tier.
+    tier_nodes: dict[str, list[dict]] = {}
+    for node in all_containers:
+        tier_nodes.setdefault(_tier_of(node), []).append(node)
+    for db in cont.get("databases", []):
+        if _slug(db["id"]) not in rel_endpoints:
+            continue  # skip unconnected datastores
+        tier_nodes.setdefault(_tier_of(db), []).append(db)
+
+    # Emit one lane subgraph per non-empty internal tier, in TIER_ORDER.
+    for tier in TIER_ORDER:
+        members = tier_nodes.get(tier)
+        if not members or tier not in _INTERNAL_TIERS:
+            continue
+        lane_id = "lane_" + _slug(tier)
+        safe_tier = tier.replace('"', "'")
+        lines.append(f'        subgraph {lane_id}["{safe_tier}"]')
+        lines.append("        direction LR")
+        for node in sorted(members, key=_node_rank):
+            nid = _slug(node["id"])
+            cap_ids.append(nid)
+            lines.append(_emit_node(
+                nid, node["label"], node.get("kind", "service"),
+                tech=node.get("tech", ""), indent="            ",
+            ))
+        lines.append("        end")
+
+    lines.append("    end")
+    lines.append("")
+
+    # ── Connected external systems (outside boundary) ─────────────────────────
+    ext_ids: set[str] = set()
+    for ext in connected_externals:
+        eid = _slug(ext["id"])
+        ext_ids.add(eid)
+        lines.append(_emit_node(eid, ext["label"], ext.get("kind", "external"), indent="    "))
+
+    if ext_ids:
+        lines.append("")
+
+    for _cd in _CLASSDEFS:
+        lines.append(f"    {_cd}")
+    # Emphasize the synthesized ingress entrypoint, if one was marked
+    _entry = next((c for c in all_containers if c.get("role") == "entrypoint"), None)
+    if _entry:
+        lines.append("    classDef entrypoint fill:#fff3cd,stroke:#d39e00,stroke-width:2px,color:#222")
+        lines.append(f"    class {_slug(_entry['id'])} entrypoint")
+    lines.append("")
+
+    # ── Build declared-ID set ─────────────────────────────────────────────────
+    declared = set(actor_ids) | set(cap_ids) | ext_ids
+
+    # Auto-declare any relationship endpoint not yet in declared (as external hex)
+    for _rel in all_rels_flat:
+        for _key in ("from", "to"):
+            _eid = _slug(_rel.get(_key, ""))
+            if _eid and _eid not in declared:
+                declared.add(_eid)
+                lines.append(_emit_node(_eid, _rel[_key], "external", indent="    "))
+
+    # ── Relationships (deduped, validated) ───────────────────────────────────
+    seen_rels: set = set()
+
+    def _add_rel(f: str, t: str, label: str) -> None:
+        f, t = _slug(f), _slug(t)
+        if f in declared and t in declared and (f, t) not in seen_rels:
+            seen_rels.add((f, t))
+            escaped = label.replace('"', "'")
+            lines.append(f'    {f} -->|"{escaped}"| {t}')
+
+    for rel in all_rels_flat:
+        _add_rel(rel["from"], rel["to"], rel.get("label", ""))
+
+    # ── Fallback: guarantee at least one actor → capability edge ─────────────
+    if actor_ids and cap_ids:
+        if not any((a, c) in seen_rels for a in actor_ids for c in cap_ids):
+            _add_rel(actor_ids[0], cap_ids[0], "uses")
+
+    return "\n".join(lines)
+
+
+def render_c4_combined(model: dict) -> str:
+    """Render HLD as a flowchart TD with a named system-boundary subgraph."""
+    return _render_flowchart_combined(model)
+
+
+def render_c4_container(model: dict) -> str:
+    """Render a (sub-)model's containers as a flowchart TD subgraph."""
+    return _render_flowchart_combined(model)
+
+
+# ── HLD flowchart context view (system as one box) ───────────────────────────
+
+def render_c4_context(model: dict) -> str:
+    """Render HLD context as a flowchart TD: system as ONE box + actors + externals."""
+    ctx  = model.get("context", {})
+    cont = model.get("containers", {})
+
     system_label = (
         cont.get("system_label")
         or ctx.get("system_name")
@@ -554,80 +834,82 @@ def render_c4_combined(model: dict) -> str:
     for a in ctx.get("actors", []):
         aid = _slug(a["id"])
         actor_ids.append(aid)
-        kind = a.get("kind", "person")
-        lines.append(_emit_node(aid, a["label"], kind, indent="    "))
+        lines.append(_emit_node(aid, a["label"], a.get("kind", "person"), indent="    "))
 
     lines.append("")
 
-    # ── System boundary (subgraph) with containers + datastores inside ───────
+    # ── System as a single box ────────────────────────────────────────────
     safe_label = system_label.replace('"', "'")
-    lines.append(f'    subgraph SYS["{safe_label}"]')
+    sys_id = _slug(system_label) or "system"
+    lines.append(f'    {sys_id}["{safe_label}"]')
 
-    cap_ids = []
-    for c in cont.get("containers", []):
-        cid = _slug(c["id"])
-        cap_ids.append(cid)
-        kind = c.get("kind", "service")
-        lines.append(_emit_node(cid, c["label"], kind, tech=c.get("tech", ""), indent="        "))
-
-    for db in cont.get("databases", []):
-        did = _slug(db["id"])
-        cap_ids.append(did)
-        kind = db.get("kind", "datastore")
-        lines.append(_emit_node(did, db["label"], kind, indent="        "))
-
-    lines.append("    end")
     lines.append("")
 
-    # ── External systems (outside boundary, hexagon + :::ext) ────────────────
-    ext_ids = set()
-    all_externals = (
-        list(ctx.get("external_systems", []))
-        + list(cont.get("external_services", []))
-    )
-    all_rels_flat = (ctx.get("relationships") or []) + (cont.get("relationships") or [])
+    # ── External systems (outside the system, hexagons) ───────────────────
+    # Context view: external systems and queues/services the system depends on
+    # but NOT internal datastores (those are inside the container boundary)
+    all_externals = list(ctx.get("external_systems", []))
+    all_rels_flat = list(ctx.get("relationships", []))
     rel_node_ids = {_slug(r["from"]) for r in all_rels_flat} | {_slug(r["to"]) for r in all_rels_flat}
 
-    seen_ext = set()
+    # Add container-level external services to context view as well
+    for ext in cont.get("external_services", []):
+        if not any(e["id"] == ext["id"] for e in all_externals):
+            all_externals.append(ext)
+    for r in cont.get("relationships", []):
+        rel_node_ids.add(_slug(r.get("from", "")))
+        rel_node_ids.add(_slug(r.get("to", "")))
+
+    ext_ids: set[str] = set()
+    seen_ext: set[str] = set()
     for ext in all_externals:
         eid = _slug(ext["id"])
-        if eid not in seen_ext and eid in rel_node_ids:
+        if eid not in seen_ext:
             seen_ext.add(eid)
             ext_ids.add(eid)
-            kind = ext.get("kind", "external")
-            lines.append(_emit_node(eid, ext["label"], kind, indent="    "))
+            lines.append(_emit_node(eid, ext["label"], ext.get("kind", "external"), indent="    "))
 
     lines.append("")
     lines.append("    classDef ext fill:#f5f5f5,stroke:#999,color:#333")
     lines.append("")
 
-    # ── Build declared-ID set for relationship validation ────────────────────
-    declared = set(actor_ids) | set(cap_ids) | ext_ids
+    # ── Declared node set ─────────────────────────────────────────────────
+    declared = set(actor_ids) | {sys_id} | ext_ids
 
-    # ── Relationships (deduped, validated) ───────────────────────────────────
+    # ── Relationships ─────────────────────────────────────────────────────
     seen_rels: set = set()
 
     def _add_rel(f: str, t: str, label: str) -> None:
-        f, t = _slug(f), _slug(t)
-        if f in declared and t in declared and (f, t) not in seen_rels:
-            seen_rels.add((f, t))
+        # Reroute any internal container ids to the system box
+        f_s, t_s = _slug(f), _slug(t)
+        if f_s not in declared:
+            f_s = sys_id
+        if t_s not in declared:
+            t_s = sys_id
+        if f_s == t_s:
+            return
+        if (f_s, t_s) not in seen_rels:
+            seen_rels.add((f_s, t_s))
             escaped = label.replace('"', "'")
-            lines.append(f'    {f} -->|"{escaped}"| {t}')
+            lines.append(f'    {f_s} -->|"{escaped}"| {t_s}')
 
+    # Actor → system
+    for a_id in actor_ids:
+        _add_rel(a_id, sys_id, "uses")
+
+    # System → externals (from any relationship involving the system or containers)
+    container_ids = {_slug(c["id"]) for c in cont.get("containers", [])}
     for rel in list(ctx.get("relationships", [])) + list(cont.get("relationships", [])):
-        _add_rel(rel["from"], rel["to"], rel.get("label", ""))
+        f_s, t_s = _slug(rel.get("from", "")), _slug(rel.get("to", ""))
+        f_is_internal = (f_s in container_ids or f_s == sys_id)
+        t_is_external = t_s in ext_ids
+        f_is_actor = f_s in set(actor_ids)
+        t_is_internal = (t_s in container_ids or t_s == sys_id)
 
-    # ── Fallback: guarantee at least one actor → capability edge ─────────────
-    # If the relationships block has nothing connecting any actor to any capability,
-    # add a plain edge from the first actor to the first capability so the visual
-    # hierarchy (actor → system boundary → externals) is always present.
-    if actor_ids and cap_ids:
-        if not any(
-            (a, c) in seen_rels
-            for a in actor_ids
-            for c in cap_ids
-        ):
-            _add_rel(actor_ids[0], cap_ids[0], "uses")
+        if f_is_internal and t_is_external:
+            _add_rel(sys_id, t_s, rel.get("label", "uses"))
+        elif f_is_actor and t_is_internal:
+            _add_rel(f_s, sys_id, rel.get("label", "uses"))
 
     return "\n".join(lines)
 
@@ -1126,8 +1408,13 @@ def render_dependency_diagram(model: dict) -> str:
 
 
 def _slug(name: str) -> str:
-    """Convert a display name to a safe Mermaid node ID."""
-    return name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+    """Convert a display name to a safe Mermaid node ID.
+
+    Strips ALL non-word characters (not just space/-/.) so ids derived from
+    arbitrary names (e.g. '@scope/pkg', 'my.app:core', '(x)') can never leak a
+    Mermaid-breaking character into node-id position.
+    """
+    return re.sub(r"[^\w]", "_", (name or "").lower()).strip("_") or "node"
 
 _MERMAID_RESERVED = {
     "end", "subgraph", "loop", "alt", "else", "opt",

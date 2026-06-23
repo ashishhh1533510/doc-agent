@@ -26,6 +26,9 @@ highly-mutual pairs. All deterministic — no LLM.
 from doc_agent.tools.import_graph import module_id, detect_frameworks
 
 _ENTRY_NAMES = {"main", "program", "index", "__main__", "app", "manage", "cli", "server"}
+# UI/frontend frameworks: a component running one of these is independently
+# runnable (a SPA build) even without HTTP routes or a main entrypoint.
+_UI_FRAMEWORK_NAMES = {"react", "nextjs", "vue", "angular", "svelte", "sveltekit", "remix"}
 
 
 def _common_dir_prefix(mids):
@@ -142,6 +145,11 @@ def compute_components(import_graph, files, repo_root) -> dict:
             if not others:
                 continue
             best = sorted(others, key=lambda o: (-weight(cl, c, o), o))[0]
+            # Only absorb a small cluster into a neighbor it is ACTUALLY connected
+            # to. A singleton with no import links to anything is an independent
+            # island (e.g. a separate frontend app) and must stay its own component.
+            if weight(cl, c, best) == 0:
+                continue
             for m in list(cl[c]):
                 cluster_of[m] = best
             changed = True
@@ -192,6 +200,7 @@ def compute_components(import_graph, files, repo_root) -> dict:
             "has_routes": any(info[m].get("routes") for m in ms),
             "has_db_models": any(c.get("is_db_model") for m in ms for c in info[m].get("classes", [])),
             "has_main_entry": any(_is_entry(m, info[m]) for m in ms),
+            "has_ui": bool(set(detect_frameworks([info[m] for m in ms])) & _UI_FRAMEWORK_NAMES),
         })
     edges = [{"from": a, "to": b, "weight": w} for (a, b), w in sorted(edge_w.items())]
 
@@ -253,6 +262,7 @@ def slim_components(components, file_cap=12):
             "has_routes": c.get("has_routes", False),
             "has_db_models": c.get("has_db_models", False),
             "has_main_entry": c.get("has_main_entry", False),
+            "has_ui": c.get("has_ui", False),
         })
     return out
 

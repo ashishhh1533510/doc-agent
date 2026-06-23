@@ -163,7 +163,18 @@ def resolve_input(project_path: str, token: str | None = None):
             clone_kwargs = {"depth": 1}
             if branch:
                 clone_kwargs["branch"] = branch          # clone the branch the subfolder lives on
-            git.Repo.clone_from(clone_url, tmp, **clone_kwargs)
+            try:
+                git.Repo.clone_from(
+                    clone_url, tmp,
+                    multi_options=["--config", "core.longpaths=true"],
+                    allow_unsafe_options=True,          # required: GitPython blocks --config otherwise
+                    **clone_kwargs,
+                )
+            except git.GitCommandError as exc:
+                stderr = (exc.stderr or "").strip()
+                raise RuntimeError(
+                    f"Failed to clone {clone_url}: {stderr[-400:] if stderr else str(exc)}"
+                ) from exc
 
             target = Path(tmp)
             if subpath:

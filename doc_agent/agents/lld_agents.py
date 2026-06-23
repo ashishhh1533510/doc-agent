@@ -393,7 +393,7 @@ class ComponentDiagramAgent:
             + compact_json(arch_context)
             + "\n\nName and refine this component view now."
         )
-        out = await run_agent_json(self._refiner, prompt)
+        out = await run_agent_json(self._refiner, prompt, fallback={"components": []})
 
         # Re-merge FROZEN structure: the LLM only NAMES; it cannot re-scope/relabel.
         named = {c.get("id"): c for c in out.get("components", [])}
@@ -422,7 +422,8 @@ class ComponentDiagramAgent:
                 "owns_entities": c.get("owns_entities", []),
                 "interfaces": interfaces,
             })
-        dependencies = [{"from": e["from"], "to": e["to"], "label": e.get("label", "requires")}
+        dependencies = [{"from": e["from"], "to": e["to"], "label": e.get("label", "requires"),
+                         "weight": e.get("weight", 1)}
                         for e in candidate_view.get("edges", [])]
         return {"diagram_type": "component", "components": components, "dependencies": dependencies,
                 "packages": candidate_view.get("packages", [])}

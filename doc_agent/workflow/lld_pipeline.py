@@ -32,6 +32,7 @@ from doc_agent.agents.lld_agents import (
     ComponentDiagramAgent, DependencyDiagramAgent,
 )
 from doc_agent.tools.component_arch import discover_components, validate_architecture_model
+from doc_agent.tools.dependency_graph import build_dependency_model
 
 from doc_agent.agents.lld_reviewer import LLDReviewerAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
@@ -265,6 +266,27 @@ async def run_lld(
                     result["saved_to"] = save_text(output_path, content)
                 return result
             # no resolvable components — fall through to the old whole-repo flow below
+
+        # ── Dependency diagram: deterministic architecture model → flat package graph ──
+        if diagram_type == "dependency":
+            candidate = discover_components(rich_facts, code_dir)
+            if candidate.get("components"):
+                agent   = ComponentDiagramAgent()
+                named   = await agent.refine(candidate, arch_ctx)
+                model   = build_dependency_model(named, rich_facts, code_dir)
+                content = render_dependency_diagram(model)
+                result  = {
+                    "diagram_type": "dependency",
+                    "content":      content,
+                    "arch_context": arch_ctx,
+                    "review_trace": [],
+                    "validation":   validate_mermaid(content),
+                    "saved_to":     None,
+                }
+                if output_path and content:
+                    result["saved_to"] = save_text(output_path, content)
+                return result
+            # no resolvable components — fall through to legacy flow below
 
         # ── All other diagram types + single-partition class diagrams ──
         model = await lld_agent.analyze(slim_facts, arch_ctx)
