@@ -1195,6 +1195,25 @@ def render_component_plantuml(model: dict) -> str:
     return "\n".join(lines)
 
 
+_IFACE_BY_LAYER = {
+    "presentation":   "API",
+    "application":    "Services",
+    "domain":         "Domain",
+    "infrastructure": "Integration",
+    "persistence":    "Persistence",
+}
+
+
+def _component_iface_name(n: dict) -> str:
+    """The provided-interface (contract) name a component exposes. Prefers the
+    LLM-named interfaces/capabilities; falls back to a layer-based contract so a
+    depended-upon component always presents a meaningful lollipop, never a bare id."""
+    ifaces = n.get("interfaces") or n.get("capabilities") or []
+    if ifaces and str(ifaces[0]).strip():
+        return str(ifaces[0]).strip()
+    return _IFACE_BY_LAYER.get(n.get("layer") or "application", "API")
+
+
 def _render_view_plantuml(view: dict) -> str:
     """Render one ViewSet view (L1 or L2) as a PlantUML component diagram string."""
     nodes = view.get("nodes", [])
@@ -1215,6 +1234,10 @@ def _render_view_plantuml(view: dict) -> str:
         "  BackgroundColor<<overflow>> #F5F5F5",
         "  BorderColor<<overflow>> #BBBBBB",
         "  FontColor<<overflow>> #888888",
+        "  BackgroundColor<<database>> #E8F0FE",
+        "  BorderColor<<database>> #4A6FA5",
+        "  BackgroundColor<<infrastructure>> #F0F0F0",
+        "  BorderColor<<infrastructure>> #888888",
         "}",
         "",
     ]
@@ -1224,38 +1247,62 @@ def _render_view_plantuml(view: dict) -> str:
         lines.append("")
 
     declared: set[str] = set()
+    # provider node id -> its provided-interface id. Dependency arrows are routed
+    # INTO these lollipops (ball-and-socket assembly), so a consumer's required
+    # arrow lands on the provider's provided interface instead of bypassing it.
+    provided_iface: dict[str, str] = {}
 
     # group real components by layer for sub-packaging; aggregates/ghosts rendered flat
     real_nodes   = [n for n in nodes if not n.get("is_aggregate") and not n.get("is_ghost")]
     agg_nodes    = [n for n in nodes if n.get("is_aggregate")]
     ghost_nodes  = [n for n in nodes if n.get("is_ghost")]
 
+    # any node that RECEIVES a dependency in this view is a provider -> it must
+    # expose a provided interface for the incoming arrow(s) to assemble onto.
+    edge_targets = {"c_" + _safe_id((e.get("to") or "").strip()) for e in edges}
+
+    def _emit_component(n: dict, indent: str = "") -> None:
+        """Declare one component + its provided-interface lollipop (assembly target)."""
+        nid    = "c_" + _safe_id(n["id"])
+        stereo = n.get("stereotype") or n.get("layer") or ""
+        stereo_str = f" <<{stereo}>>" if stereo else ""
+        lines.append(f'{indent}component "{_safe_label(n.get("label") or n["id"])}" as {nid}{stereo_str}')
+        declared.add(nid)
+        has_surface = n.get("has_routes") or n.get("has_db") or n.get("owns_entities")
+        if has_surface or nid in edge_targets:
+            iid = f"{nid}_i0"
+            lines.append(f'{indent}interface "{_safe_label(_component_iface_name(n))}" as {iid}')
+            lines.append(f"{indent}{nid} -- {iid}")
+            provided_iface[nid] = iid
+
     if real_nodes:
-        by_layer: dict[str, list] = {}
-        for n in real_nodes:
-            layer = n.get("layer") or "application"
-            by_layer.setdefault(layer, []).append(n)
-        ordered_layers = [l for l in _LAYER_ORDER if l in by_layer]
-        ordered_layers += [l for l in by_layer if l not in ordered_layers]
-        for layer in ordered_layers:
-            layer_label = {"presentation": "Presentation / API", "application": "Application Services",
-                           "domain": "Domain", "infrastructure": "Infrastructure",
-                           "persistence": "Persistence"}.get(layer, layer.title())
-            lines.append(f'package "{_safe_label(layer_label)}" {{')
-            for n in by_layer[layer]:
-                nid   = "c_" + _safe_id(n["id"])
-                stereo = n.get("stereotype") or n.get("layer") or ""
-                stereo_str = f" <<{stereo}>>" if stereo else ""
-                lines.append(f'  component "{_safe_label(n.get("label") or n["id"])}" as {nid}{stereo_str}')
-                declared.add(nid)
-                # lollipop interface (max 1 per component)
-                has_surface = n.get("has_routes") or n.get("has_db") or n.get("owns_entities")
-                ifaces = n.get("interfaces") or n.get("capabilities") or []
-                if has_surface and ifaces:
-                    iid = f"{nid}_i0"
-                    lines.append(f'  interface "{_safe_label(str(ifaces[0]))}" as {iid}')
-                    lines.append(f"  {nid} -- {iid}")
+        # ONE unified system: internal (non-infra) components live INSIDE a single
+        # system-boundary rectangle; the shared platform/infrastructure component sits
+        # OUTSIDE on the sink side, alongside external datastores/cloud — exactly the
+        # reference shape. This is a SINGLE outer box, not the per-layer packages that
+        # forced a vertical stack. Layer remains visible via each <<stereotype>>.
+        _sink_rank = {"presentation": 0, "application": 1, "domain": 2,
+                      "infrastructure": 3, "persistence": 4}
+        ordered_nodes = sorted(
+            real_nodes,
+            key=lambda n: (_sink_rank.get(n.get("layer") or "application", 1),
+                           -(n.get("member_count") or 0), n["id"]),
+        )
+        # Data-access / platform tier renders OUTSIDE the system box on the sink side
+        # (next to the datastores it funnels to), exactly like the reference's
+        # Persistence/Security services. Everything else is a business component inside.
+        internal = [n for n in ordered_nodes
+                    if not (n.get("is_infra") or (n.get("layer") in ("infrastructure", "persistence")))]
+        platform = [n for n in ordered_nodes if n not in internal]
+
+        sys_label = _safe_label(view.get("system_label") or "System")
+        if internal:
+            lines.append(f'rectangle "{sys_label}" as sys_boundary {{')
+            for n in internal:
+                _emit_component(n, indent="  ")
             lines.append("}")
+        for n in platform:                 # shared platform/infra service — outside the box
+            _emit_component(n)
         lines.append("")
 
     for n in agg_nodes:
@@ -1270,7 +1317,24 @@ def _render_view_plantuml(view: dict) -> str:
         nid = "c_" + _safe_id(n["id"])
         lines.append(f'component "{_safe_label(n.get("label") or n["id"])}" as {nid} <<boundary>>')
         declared.add(nid)
+        # a neighbouring module that is depended upon also exposes a provided
+        # interface, so cross-module wiring reads as an assembly into its contract.
+        if nid in edge_targets:
+            iid = f"{nid}_i0"
+            lines.append(f'interface "{_safe_label(n.get("label") or n["id"])}" as {iid}')
+            lines.append(f"{nid} -- {iid}")
+            provided_iface[nid] = iid
     if ghost_nodes:
+        lines.append("")
+
+    # external systems (datastores / services) — rendered as stereotyped components
+    # that dependency arrows assemble into. Ids prefixed identically to component ids.
+    for x in view.get("externals", []):
+        nid = "c_" + _safe_id(x["id"])
+        stereo = x.get("stereotype") or "infrastructure"
+        lines.append(f'component "{_safe_label(x.get("label") or x["id"])}" as {nid} <<{stereo}>>')
+        declared.add(nid)
+    if view.get("externals"):
         lines.append("")
 
     seen_edges: set[tuple] = set()
@@ -1280,7 +1344,10 @@ def _render_view_plantuml(view: dict) -> str:
         if a not in declared or b not in declared or a == b or (a, b) in seen_edges:
             continue
         seen_edges.add((a, b))
-        lines.append(f'{a} ..> {b} : {_safe_label(e.get("label") or "requires")}')
+        # route the required arrow into the provider's provided interface when one
+        # exists (assembly); else fall back to a plain box-to-box dependency.
+        target = provided_iface.get(b, b)
+        lines.append(f'{a} ..> {target} : {_safe_label(e.get("label") or "requires")}')
 
     if omitted.get("nodes") or omitted.get("edges"):
         parts = []

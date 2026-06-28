@@ -48,12 +48,63 @@ def _module_label(mkey: str) -> str:
     return mkey.split("/")[-1] or mkey
 
 
+# Adaptive-depth budget: a module holding more files than this is a giant
+# monorepo package (e.g. packages/nocodb) that should fragment into its
+# sub-projects rather than collapse into one over-folded box. Such a module is
+# re-partitioned one directory segment deeper, repeated until every module fits
+# the budget or no further structural split is possible. Convention-based
+# readability guard, not repo-specific; a normal repo descends zero times.
+_MODULE_FILE_BUDGET = 60
+_MAX_MODULES = 12
+_MAX_COMPONENTS_PER_MODULE = 6
+
+
+def _split_deeper(mfiles: list) -> dict:
+    """Re-partition a single module one directory segment past ITS own common
+    prefix. Same directory-tree idiom as the top-level partition, just scoped to
+    this module's members. Returns subkey -> sorted members."""
+    cp = len(_common_dir_prefix(sorted(mfiles)))
+    sub: dict[str, list] = {}
+    for m in sorted(mfiles):
+        sub.setdefault(_module_key(m, cp), []).append(m)
+    return sub
+
+
 def _derive_modules(runtime: list) -> dict:
-    """module_key -> sorted member ids. Directory-tree only, deterministic."""
+    """module_key -> sorted member ids. Directory-tree only, deterministic.
+
+    Module-count-bounded: after the shallow common-root+1 partition, iteratively
+    pick the SINGLE LARGEST oversized module (> _MODULE_FILE_BUDGET files) and
+    split it one level deeper — but ONLY if (a) the split produces >1 distinct
+    sub-module AND (b) the resulting total module count stays < _MAX_MODULES.
+    Stops when no qualifying split exists or the cap is reached.
+
+    Net: a packages/* workspace splits into real sub-projects, but a single huge
+    package stays ONE module rather than fragmenting into hundreds. A normal repo
+    descends zero times (unchanged behavior)."""
     cp = len(_common_dir_prefix(sorted(runtime)))
     mods: dict[str, list] = {}
     for m in sorted(runtime):
         mods.setdefault(_module_key(m, cp), []).append(m)
+    for _ in range(_MAX_MODULES):          # generous cap to prevent any infinite loop
+        oversized = sorted(
+            [k for k, v in mods.items() if len(v) > _MODULE_FILE_BUDGET],
+            key=lambda k: -len(mods[k]),   # largest first
+        )
+        applied = False
+        for k in oversized:
+            sub = _split_deeper(mods[k])
+            if len(sub) <= 1:
+                continue                    # not splittable — try next
+            new_total = len(mods) - 1 + len(sub)
+            if new_total >= _MAX_MODULES:
+                continue                    # would exceed cap — try next
+            del mods[k]
+            mods.update(sub)
+            applied = True
+            break                           # one split per pass; re-evaluate
+        if not applied:
+            break
     return mods
 
 
@@ -159,28 +210,78 @@ def _cluster_has_evidence(members: list, facts: dict) -> tuple:
     return has_routes, has_db
 
 
+_SURFACE_COVERAGE = 0.80   # cumulative route/db weight threshold for dominant-surface selection
+
+
 def _qualify_clusters(comms: list, G: "nx.DiGraph", facts: dict) -> set:
     """Indices of clusters that own a responsibility. A cluster is EVIDENCE; only a
-    qualified cluster becomes a component. Structural only — no name/keyword matching."""
+    qualified cluster becomes a component. Structural only — no name/keyword matching.
+
+    Tier 1 — dominant capability surface:
+      Route clusters are selected by cumulative route-count coverage, NOT by a simple
+      has_routes flag. Only clusters whose combined route count covers ≥80% of the
+      module's total route count qualify. This ensures feature controllers (Notifications,
+      Sorts, Calendars — each with a handful of routes) fold into the dominant API
+      surfaces, while genuinely distinct surfaces (Public API + Admin API) both survive.
+      Same cumulative logic applies to DB-model clusters.
+    Tier 2 — substantial + genuinely central application cluster (unchanged).
+    """
     cl_of = {m: i for i, c in enumerate(comms) for m in c}
-    importers = [set() for _ in comms]                 # distinct other clusters importing in
+    importers = [set() for _ in comms]
+    exporters = [set() for _ in comms]
     for u, v in G.edges():
         cu, cv = cl_of.get(u), cl_of.get(v)
         if cu is not None and cv is not None and cu != cv:
             importers[cv].add(cu)
+            exporters[cu].add(cv)
     masses = sorted(len(c) for c in comms)
     med = masses[len(masses) // 2] if masses else 0
+
+    # ── Tier 1: dominant API / DB surfaces ──────────────────────────────────
+    # Weight = pure count of routes / db-model classes in the cluster (not × member_count,
+    # to avoid biasing toward large directories with few real routes).
+    route_weight = {i: sum(len(facts[m].get("routes", [])) for m in c) for i, c in enumerate(comms)}
+    db_weight    = {i: sum(1 for m in c for cc in facts[m].get("classes", [])
+                           if cc.get("is_db_model")) for i, c in enumerate(comms)}
+
+    def _dominant(weights: dict, min_total: int) -> set:
+        """Cumulative coverage selection: add clusters (heaviest first) until
+        their combined weight covers ≥ _SURFACE_COVERAGE of the total.
+        Returns empty set when total < min_total (no meaningful surface)."""
+        total = sum(weights.values())
+        if total < min_total:
+            return set()
+        out, cum = set(), 0
+        for idx, w in sorted(weights.items(), key=lambda kv: -kv[1]):
+            out.add(idx)
+            cum += w
+            if cum / total >= _SURFACE_COVERAGE:
+                break
+        return out
+
+    dominant_routes = _dominant(route_weight, min_total=3)
+    dominant_db     = _dominant(db_weight,    min_total=1)
+    import sys
+    if dominant_routes or dominant_db:
+        rw_sorted = sorted(route_weight.items(), key=lambda kv: -kv[1])
+        dw_sorted = sorted(db_weight.items(), key=lambda kv: -kv[1])
+        print(f"[component_arch] route weights: {rw_sorted} → {len(dominant_routes)} dominant",
+              file=sys.stderr)
+        print(f"[component_arch] db weights:    {dw_sorted} → {len(dominant_db)} dominant",
+              file=sys.stderr)
+
     qualified = set()
     for i, c in enumerate(comms):
-        has_routes, has_db = _cluster_has_evidence(c, facts)
-        if has_routes or has_db:                       # Tier 1: capability surface
+        if i in dominant_routes or i in dominant_db:   # Tier 1: dominant surface only
             qualified.add(i)
-        elif len(c) >= max(2, med) and len(importers[i]) >= 2:   # Tier 2: substantial + central
+        elif (len(c) >= max(3, med)                    # Tier 2: substantial AND genuinely central
+              and len(importers[i]) >= 3
+              and len(exporters[i]) >= 1):
             qualified.add(i)
-    if not qualified:                                  # pure-library fallback
+    if not qualified:                                   # pure-library fallback
         ranked = sorted(range(len(comms)),
                         key=lambda i: (-len(comms[i]), -len(importers[i])))
-        qualified = set(ranked[:min(6, len(comms))])
+        qualified = set(ranked[:min(4, len(comms))])
     return qualified
 
 
@@ -243,7 +344,13 @@ def _consolidate_architecture(groups: list, ent_refs: dict, G) -> tuple:
     no coupling to any capability (the caller pools them into the single infra sink)."""
     owners = [i for i, g in enumerate(groups) if any(ent_refs.get(m) for m in g)]
     if not owners:
-        return [set(g) for g in groups], []          # entity-less repo: leave clusters as-is
+        # Entity-less module (SDK / utility package): keep only the top-3 by size
+        # and fold the rest into orphans so they collapse into the infra sink.
+        # Without this, every utility cluster survives as a separate component.
+        ranked_all = sorted(range(len(groups)), key=lambda j: -len(groups[j]))
+        keep_idx = set(ranked_all[:min(3, len(ranked_all))])
+        orphans_el = [set(groups[j]) for j in ranked_all if j not in keep_idx]
+        return [set(groups[j]) for j in ranked_all if j in keep_idx], orphans_el
     comp = {i: set(groups[i]) for i in owners}
     owner_of_file = {m: i for i in owners for m in groups[i]}
     orphans = []
@@ -362,6 +469,183 @@ def _classify_edge(src: dict, dst: dict) -> str:
     return "requires"
 
 
+def _fallback_label(layer: str, has_routes: bool, has_db: bool,
+                    owns: list, module_label: str) -> str:
+    """Deterministic, human-readable component name from structural evidence — used
+    when the LLM names nothing (free-tier reject / offline). Generic across stacks:
+    primary owned entity (or module) + the component's capability surface suffix.
+    Guarantees a meaningful label instead of a raw `comp_NN` id."""
+    suffix = _capabilities(layer, has_routes, has_db)[0]   # API / Persistence / Services / ...
+    if owns:
+        head = owns[0] if len(owns) == 1 else f"{owns[0]} & {owns[1]}"
+    elif module_label:
+        head = module_label
+    else:
+        head = ""
+    return f"{head} {suffix}".strip() if head else suffix
+
+
+# ── external system discovery (deterministic, reuses container_model scanners) ──
+def discover_external_systems(rich_facts: dict) -> list:
+    """Datastores / caches / queues / cloud-and-LLM SDKs the repo talks to, detected
+    from import tokens + build-manifest deps. Reuses the same scanners HLD/container
+    discovery uses, so detection is consistent and repo/stack-agnostic."""
+    from doc_agent.tools.container_model import (
+        _scan_db_engines, _scan_services,
+        _consolidate_datastores, _consolidate_queues,
+    )
+    imports_flat: list = []
+    for f in rich_facts.get("files", []):
+        imports_flat.extend(f.get("imports", []) or [])
+    mdeps = rich_facts.get("manifest_deps") or []
+
+    db = _consolidate_queues(_consolidate_datastores(_scan_db_engines(imports_flat, mdeps)))
+    svc = _scan_services(imports_flat, mdeps)
+
+    out, seen = [], set()
+    for lbl, (label, kind) in db.items():
+        if label in seen:
+            continue
+        seen.add(label)
+        stereo = "database" if kind in ("datastore", "cache") else "infrastructure"
+        out.append({"id": f"ext_{_safe_ext_id(label)}", "label": label,
+                    "kind": kind, "stereotype": stereo})
+    for lbl, (label, kind, _verb) in svc.items():
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append({"id": f"ext_{_safe_ext_id(label)}", "label": label,
+                    "kind": kind, "stereotype": "infrastructure"})
+    return out[:8]
+
+
+def _safe_ext_id(label: str) -> str:
+    return re.sub(r"\W+", "_", label).strip("_").lower() or "ext"
+
+
+_GLOBAL_COVERAGE = 0.80   # cumulative size threshold for anchor selection in entity-less repos
+_MAX_CONTEXTS    = 8      # global cap on internal (non-infra) components — readability budget
+
+
+def _consolidate_groups(final_groups: list, group_module: list, group_is_infra: list,
+                        G: "nx.DiGraph", ent_refs: dict) -> tuple:
+    """Global responsibility consolidation across modules (the reference-diagram shape).
+
+    Entity-owning, non-infra groups are ANCHOR contexts (bounded contexts). Every other
+    non-infra group (route controllers, application helpers, utility bundles) folds into the
+    anchor it is most import-coupled to — so a feature controller joins the context whose data
+    it serves instead of standing alone. Infra groups are shared services/sinks and are left
+    intact. Entity-less repos (SDKs) fall back to size-dominant anchors (cumulative 80%).
+
+    Returns (groups, modules, is_infra) with the same parallel-list shape, only fewer entries.
+    Only ever REDUCES the group count; deterministic, structural — no names/keywords.
+    """
+    n = len(final_groups)
+    if n <= 1:
+        return final_groups, group_module, group_is_infra
+
+    file_grp = {m: i for i, g in enumerate(final_groups) for m in g}
+    coup: dict[tuple, int] = {}
+    for u, v in G.edges():
+        gu, gv = file_grp.get(u), file_grp.get(v)
+        if gu is not None and gv is not None and gu != gv:
+            coup[(gu, gv)] = coup.get((gu, gv), 0) + 1
+
+    def pair_w(a: int, b: int) -> int:
+        return coup.get((a, b), 0) + coup.get((b, a), 0)
+
+    owns = [any(ent_refs.get(m) for m in g) for g in final_groups]
+    anchors = [i for i in range(n) if owns[i] and not group_is_infra[i]]
+    if not anchors:
+        # entity-less: pick size-dominant non-infra groups until 80% of files covered
+        non_infra = [i for i in range(n) if not group_is_infra[i]]
+        ordered = sorted(non_infra, key=lambda i: (-len(final_groups[i]), i))
+        total = sum(len(final_groups[i]) for i in non_infra) or 1
+        cum = 0
+        for i in ordered:
+            anchors.append(i)
+            cum += len(final_groups[i])
+            if cum / total >= _GLOBAL_COVERAGE:
+                break
+    anchor_set = set(anchors)
+
+    # fold each non-anchor, non-infra group into its most-coupled anchor (only if coupled)
+    parent = list(range(n))
+    for i in range(n):
+        if i in anchor_set or group_is_infra[i] or not anchors:
+            continue
+        best = max(anchors, key=lambda a: (pair_w(i, a), len(final_groups[a]), -a))
+        if pair_w(i, best) > 0:
+            parent[i] = best
+        # else: an island with no coupling — keep as its own component
+
+    merged: dict[int, dict] = {}
+    order: list[int] = []
+    for i in range(n):
+        root = parent[i]
+        if root not in merged:
+            merged[root] = {"files": set(), "module": group_module[root],
+                            "infra": group_is_infra[root]}
+            order.append(root)
+        merged[root]["files"] |= final_groups[i]
+
+    # ── Pillar 1: collapse ALL per-module infra sinks into ONE global infra component ──
+    # A module-first pass produces one infra sink per module; on a large monorepo that is
+    # the 12-box `<<infrastructure>>` explosion. There is architecturally one shared
+    # platform/infrastructure surface, so union every infra root into a single sink.
+    ctx_roots   = [r for r in order if not merged[r]["infra"]]
+    infra_roots = [r for r in order if merged[r]["infra"]]
+    infra_files: set = set()
+    for r in infra_roots:
+        infra_files |= merged[r]["files"]
+    infra_module = group_module[infra_roots[0]] if infra_roots else None
+
+    # ── Pillar 2: cap internal contexts to _MAX_CONTEXTS, folding the tail in ──────────
+    # Coupling recomputed at the merged-root level so a folded child counts toward its
+    # parent. Rank entity owners first (real bounded contexts), then size, then fan-in;
+    # fold the tail into the most-coupled survivor (fallback: largest).
+    root_of: dict = {}
+    for r in ctx_roots:
+        for m in merged[r]["files"]:
+            root_of[m] = r
+    rcoup: dict[tuple, int] = {}
+    for u, v in G.edges():
+        ru, rv = root_of.get(u), root_of.get(v)
+        if ru is not None and rv is not None and ru != rv:
+            rcoup[(ru, rv)] = rcoup.get((ru, rv), 0) + 1
+
+    def _rpair(a: int, b: int) -> int:
+        return rcoup.get((a, b), 0) + rcoup.get((b, a), 0)
+
+    def _fanin(r: int) -> int:
+        return sum(w for (a, b), w in rcoup.items() if b == r)
+
+    def _owns(r: int) -> bool:
+        return any(ent_refs.get(m) for m in merged[r]["files"])
+
+    ranked = sorted(ctx_roots,
+                    key=lambda r: (_owns(r), len(merged[r]["files"]), _fanin(r)),
+                    reverse=True)
+    keep = ranked[:_MAX_CONTEXTS]
+    fold = ranked[_MAX_CONTEXTS:]
+    acc = {k: set(merged[k]["files"]) for k in keep}
+    for r in fold:
+        if keep:
+            best = max(keep, key=lambda k: (_rpair(r, k), len(merged[k]["files"]), -k))
+            acc[best] |= merged[r]["files"]
+        else:                       # no surviving context → fold into the infra sink
+            infra_files |= merged[r]["files"]
+
+    out_files  = [acc[k] for k in keep]
+    out_mod    = [merged[k]["module"] for k in keep]
+    out_infra  = [False for _ in keep]
+    if infra_files:
+        out_files.append(infra_files)
+        out_mod.append(infra_module or (group_module[0] if group_module else ""))
+        out_infra.append(True)
+    return out_files, out_mod, out_infra
+
+
 def discover_components(rich_facts: dict, repo_root: str) -> dict:
     from pathlib import Path
     facts = runtime_facts(rich_facts, repo_root)
@@ -377,31 +661,56 @@ def discover_components(rich_facts: dict, repo_root: str) -> dict:
     if not runtime:
         return empty
 
-    # ── capability clustering: GLOBAL import-coupling modularity (restored) ──
-    comms = _cluster(G, runtime)
-    # ── qualification: PRESERVED — drops DTO/controller/utility noise ──
-    qualified = _qualify_clusters(comms, G, facts)
-    groups, infra = _consolidate_clusters(comms, qualified, G)
-    # ── architectural consolidation: fold non-capability clusters into capabilities ──
     entities = _defined_entities(facts)
     ent_refs = {m: _entity_refs(facts[m], entities) for m in runtime}
-    cap_groups, orphans = _consolidate_architecture(groups, ent_refs, G)
-    infra_members = set(infra)
-    for o in orphans:
-        infra_members |= o
-    final_groups = list(cap_groups)
-    infra_idx = -1
-    if infra_members:
-        final_groups.append(infra_members)
-        infra_idx = len(final_groups) - 1
+
+    # ── module-first discovery ───────────────────────────────────────────────
+    # Partition runtime files into physical modules (directory tree only), then
+    # cluster + qualify + consolidate WITHIN each module. Consolidation never
+    # crosses a module boundary, so a capability cannot absorb files from
+    # unrelated packages into one mega-component — the failure mode that collapsed
+    # large monorepos into a single box. Clustering is unchanged (just scoped per
+    # module); a single-module repo loops once and behaves as global discovery did.
+    final_groups: list[set] = []
+    group_module: list[str] = []     # parallel: module key per final group
+    group_is_infra: list[bool] = []  # parallel: is this the module's infra sink
+    for mkey, mfiles in _derive_modules(runtime).items():
+        subG = G.subgraph(mfiles)
+        comms = _cluster(G, mfiles)
+        qualified = _qualify_clusters(comms, subG, facts)
+        groups, infra = _consolidate_clusters(comms, qualified, subG)
+        cap_groups, orphans = _consolidate_architecture(groups, ent_refs, subG)
+        cap_groups = _cap_groups(cap_groups, _MAX_COMPONENTS_PER_MODULE)
+        infra_members = set(infra)
+        for o in orphans:
+            infra_members |= o
+        for g in cap_groups:
+            final_groups.append(set(g))
+            group_module.append(mkey)
+            group_is_infra.append(False)
+        if infra_members:
+            final_groups.append(infra_members)
+            group_module.append(mkey)
+            group_is_infra.append(True)
+
+    # ── global responsibility consolidation (reference-diagram granularity) ──────
+    # Fold cross-module feature controllers / helpers into the bounded context they
+    # serve, so the diagram shows ~5-12 subsystems, not per-folder feature clusters.
+    final_groups, group_module, group_is_infra = _consolidate_groups(
+        final_groups, group_module, group_is_infra, G, ent_refs)
 
     # ── system boundary: ONE package; the boxes inside are capabilities, not projects ──
-    sys_label = Path(repo_root).name or "System"
+    # Prefer the human repo name (e.g. "OpenMetadata"); Path(repo_root).name is the temp
+    # clone dir ("doc_agent_clone_xxxx") for URL inputs and must never surface in the diagram.
+    sys_label = (rich_facts.get("repo_name") or "").strip() or Path(repo_root).name or "System"
+
     components: list = []
     comp_of: dict = {}
     for i, g in enumerate(final_groups):
         members = sorted(g)
-        layer = "infrastructure" if i == infra_idx else _dominant_layer([role[m] for m in members])
+        mkey = group_module[i]
+        is_infra = group_is_infra[i]
+        layer = "infrastructure" if is_infra else _dominant_layer([role[m] for m in members])
         has_routes = any(facts[m].get("routes") for m in members)
         has_db = any(cc.get("is_db_model") for m in members for cc in facts[m].get("classes", []))
         owns = sorted({e for m in members for e in ent_refs.get(m, set())})[:8]
@@ -409,9 +718,12 @@ def discover_components(rich_facts: dict, repo_root: str) -> dict:
         for m in g:
             comp_of[m] = cid
         components.append({
-            "id": cid, "label": "", "module": "system", "module_label": sys_label,
-            "layer": layer, "stereotype": layer, "is_infra": i == infra_idx,
+            "id": cid,
+            "label": _fallback_label(layer, has_routes, has_db, owns, _module_label(mkey)),
+            "module": mkey, "module_label": _module_label(mkey),
+            "layer": layer, "stereotype": layer, "is_infra": is_infra,
             "member_count": len(members), "members": members[:12],
+            "member_files": members,   # FULL list for fidelity scoring (members[] is display-capped)
             "has_routes": has_routes, "has_db": has_db, "owns_entities": owns,
             "capabilities": _capabilities(layer, has_routes, has_db),
             "operation_evidence": _operation_evidence(members, facts),
@@ -497,7 +809,10 @@ def validate_architecture_model(rich_facts_model: dict, rich_facts: dict | None 
             # indicate a qualification-gate miss -- those are the true "leaked utility" case.
             if c.get("layer") in ("infrastructure", "persistence"):
                 hard.append(f'{c["id"]}: singleton with no capability surface (qualification leak)')
-            else:
+            elif not c.get("owns_entities"):
+                # an entity-owning single-class unit is a legitimate bounded context
+                # (cf. the reference's per-entity components); only entity-less singletons
+                # signal an under-consolidated fragment.
                 soft.append(f'{c["id"]}: singleton domain/application component with no capability surface')
     if len(comps) > 20:
         soft.append(f"{len(comps)} components — likely under-consolidated (should scale with architecture, not files)")

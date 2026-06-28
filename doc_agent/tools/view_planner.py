@@ -9,25 +9,156 @@ No LLM calls. No name/keyword matching. Pure structural signals.
 """
 from __future__ import annotations
 
+import math
+
 from doc_agent.tools.architecture_model import _LAYER_ORDER, _ROLE_LABEL
 
 # ── readability budget constants (single source of truth) ───────────────────
 MAX_NODES_PER_VIEW  = 10   # aggregate or real nodes rendered per diagram
 MAX_EDGES_PER_VIEW  = 16   # dependency arrows per diagram
 DRILL_MIN_COMPONENTS = 2   # a group needs >=N components to warrant its own L2
+MAX_COMPONENTS_SINGLE = 9  # single-view component budget (~8 contexts + 1 platform)
+
+
+# ── architecture composition (the deterministic stage that was missing) ───────
+# discover_components hands us the raw import-dependency graph (files that import each
+# other) with names. Rendering THAT verbatim is what produced a dependency-graph hairball.
+# compose_architecture (exposed as plan_single_view for back-compat) transforms it into a
+# bounded, LAYERED architecture before render — deterministic, no LLM design, no names:
+#   1. tier each component by its architectural layer (_LAYER_ORDER rank)
+#   2. bound to <=MAX_COMPONENTS_SINGLE nodes, folding the tail into its most-coupled survivor
+#   3. keep only FORWARD edges (tier(dst) >= tier(src)) and cap them to ~1.5x nodes — a sparse
+#      left->right DAG instead of a mesh of import arrows
+#   4. route ALL datastores through the single deepest-tier component (the data-access tier)
+#      and ALL cloud/services through the deepest infrastructure component — N*M -> N+M, the
+#      one rule that removes the hairball on any repo
+
+def _tier(c: dict) -> int:
+    layer = c.get("layer") or "application"
+    return _LAYER_ORDER.index(layer) if layer in _LAYER_ORDER else 1
+
+
+def plan_single_view(model: dict, externals: list | None = None) -> dict:
+    """Compose ONE layered architecture diagram from the named component model.
+
+    See the module comment above: tier -> bound nodes -> forward-edge DAG -> route storage
+    through a single data-access representative. Deterministic; the LLM only named the boxes.
+    """
+    components   = [c for c in model.get("components", []) if (c.get("id") or "").strip()]
+    dependencies = list(model.get("dependencies", model.get("edges", [])))
+    externals    = externals or []
+    if not components:
+        return {"views": []}
+
+    fan_in: dict[str, int] = {c["id"]: 0 for c in components}
+    for e in dependencies:
+        if e.get("to") in fan_in:
+            fan_in[e["to"]] += 1
+
+    # ── 2. node budget: keep the top-N, fold the tail into its most-coupled survivor ──
+    ranked   = sorted(components, key=lambda c: score_component(c, fan_in.get(c["id"], 0)), reverse=True)
+    keep     = ranked[:MAX_COMPONENTS_SINGLE]
+    fold     = ranked[MAX_COMPONENTS_SINGLE:]
+    keep_ids = {c["id"] for c in keep}
+    keep_by_id = {c["id"]: c for c in keep}
+
+    coupling: dict[str, dict] = {}
+    for e in dependencies:
+        f, t, w = e.get("from"), e.get("to"), e.get("weight", 1)
+        if f in keep_ids and t and t not in keep_ids:
+            coupling.setdefault(t, {})[f] = coupling.setdefault(t, {}).get(f, 0) + w
+        if t in keep_ids and f and f not in keep_ids:
+            coupling.setdefault(f, {})[t] = coupling.setdefault(f, {}).get(t, 0) + w
+    redirect: dict[str, str] = {}
+    for c in fold:
+        cands = coupling.get(c["id"])
+        if cands:
+            redirect[c["id"]] = max(cands, key=lambda k: (cands[k], k))
+
+    def _rid(cid: str) -> str:
+        return redirect.get(cid, cid)
+
+    # ── 3. internal edges → forward-only, deduped, weight-capped (layered DAG) ──
+    agg: dict[tuple, int] = {}
+    for e in dependencies:
+        a, b = _rid(e.get("from", "")), _rid(e.get("to", ""))
+        if a not in keep_ids or b not in keep_ids or a == b:
+            continue
+        if _tier(keep_by_id[b]) < _tier(keep_by_id[a]):   # drop back-edges → strictly forward flow
+            continue
+        agg[(a, b)] = agg.get((a, b), 0) + e.get("weight", 1)
+    edge_budget   = max(1, math.ceil(1.5 * len(keep)))
+    ranked_edges  = sorted(agg.items(), key=lambda kv: (-kv[1], kv[0]))[:edge_budget]
+    edges: list[dict] = [{"from": a, "to": b, "label": "requires", "weight": w}
+                         for (a, b), w in ranked_edges]
+    omitted_edges = max(0, len(agg) - len(edges))
+
+    # ── 4. storage routing: ALL externals funnel through ONE representative each ──
+    db_ext  = [x for x in externals if x.get("stereotype") == "database"]
+    svc_ext = [x for x in externals if x.get("stereotype") != "database"]
+
+    def _deepest(cands: list) -> dict | None:
+        if not cands:
+            return None
+        return max(cands, key=lambda c: (_tier(c), bool(c.get("has_db")),
+                                         fan_in.get(c["id"], 0), c.get("member_count", 0), c["id"]))
+
+    # data-access representative = deepest persistence/db-bearing component (else deepest of all)
+    db_rep  = _deepest([c for c in keep if c.get("has_db") or c.get("layer") == "persistence"]) \
+              or _deepest(keep)
+    # integration representative = deepest infrastructure component (else the data rep)
+    svc_rep = _deepest([c for c in keep if c.get("layer") == "infrastructure" or c.get("is_infra")]) \
+              or db_rep
+
+    ext_seen: set[tuple] = set()
+    for x in db_ext:
+        if db_rep:
+            key = (db_rep["id"], x["id"])
+            if key not in ext_seen:
+                ext_seen.add(key)
+                edges.append({"from": db_rep["id"], "to": x["id"], "label": "requires", "weight": 1})
+    for x in svc_ext:
+        if svc_rep:
+            key = (svc_rep["id"], x["id"])
+            if key not in ext_seen:
+                ext_seen.add(key)
+                edges.append({"from": svc_rep["id"], "to": x["id"], "label": "requires", "weight": 1})
+
+    pkgs = model.get("packages") or []
+    system_label = (pkgs[0].get("label") if pkgs else None) or "System"
+
+    view = {
+        "level":        "L1",
+        "title":        "Component Diagram",
+        "nodes":        [dict(c) for c in keep],
+        "edges":        edges,
+        "externals":    externals,
+        "system_label": system_label,
+        "omitted":      {"nodes": len(fold), "edges": omitted_edges},
+    }
+    return {"views": [view]}
 
 
 # ── scoring functions ────────────────────────────────────────────────────────
 
 def score_component(c: dict, fan_in: int) -> int:
     """Importance score for one component. Higher = keep when space is tight."""
-    s  = 1000 if c.get("has_routes") else 0
-    s +=  500 if c.get("has_db")     else 0
-    s +=   50 * len(c.get("owns_entities") or [])
+    # Domain ownership dominates: an entity-owning bounded context (the reference's
+    # Student/Exam/Staff) must outrank a routes-only presentation box, which previously
+    # buried real contexts beneath feature controllers. Routes/db still count, capped
+    # below the entity-owner base so they never overtake a genuine context.
+    s  =  800 if (c.get("owns_entities"))      else 0
+    s +=  400 if c.get("has_routes")           else 0
+    s +=  300 if c.get("has_db")               else 0
+    s +=   60 * len(c.get("owns_entities") or [])
     s +=    5 * fan_in
     s +=        c.get("member_count", len(c.get("members") or []))
     if c.get("is_infra"):          # consolidated orphan sink — demote
         s = s // 10
+    elif not (c.get("has_routes") or c.get("has_db") or c.get("owns_entities")):
+        # No capability surface and no domain ownership → likely a utility/helper.
+        # Demote so it only appears when budget has room after real components fill in.
+        s = s // 4
     return s
 
 

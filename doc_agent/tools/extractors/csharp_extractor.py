@@ -262,9 +262,24 @@ def _describe_class(node, doc) -> dict:
 
 
 def _using_name(node):
-    for c in node.children:
-        if c.type in ("identifier", "qualified_name"):
-            return base.node_text(c)
+    """Namespace targeted by a `using` directive.
+
+    For an alias directive — `using Foo = Some.Namespace.Type;` — the dependency is
+    the TARGET on the right of '=', not the local alias `Foo`. Without this the alias
+    identifier leaks out as a bogus import: e.g. `using Deferral =
+    Windows.Foundation.Deferral;` would surface a fake 'Deferral' package, and
+    `using Dispatcher = global::Microsoft.UI.Dispatching.DispatcherQueue;` a fake
+    'Dispatcher'. We take the first name AFTER any '=' so the real namespace
+    (Windows.Foundation / Microsoft.UI...) flows to the dependency resolver instead.
+    """
+    children = node.children
+    eq_idx = next((i for i, c in enumerate(children) if c.type == "="), None)
+    search = children[eq_idx + 1:] if eq_idx is not None else children
+    for c in search:
+        if c.type in ("identifier", "qualified_name", "alias_qualified_name"):
+            name = base.node_text(c)
+            # Drop the C# `global::` root qualifier — not part of the namespace.
+            return name[8:] if name.startswith("global::") else name
     return ""
 
 

@@ -49,6 +49,7 @@ from doc_agent.tools.container_model import (
     assign_architecture_layers,
     drop_operational_noise,
     assign_domains,
+    consolidate_containers_for_abstraction,
     reduce_edges_for_readability,
     curate_significant_edges,
     assign_container_roles,
@@ -57,6 +58,7 @@ from doc_agent.tools.container_model import (
 from doc_agent.tools.manifest_parser import parse_all_manifests
 from doc_agent.agents.hld_grounded_architect import HLDGroundedArchitect
 from doc_agent.tools.diagram_validator import validate_mermaid
+from doc_agent.workflow.fidelity_scorer import compute_accuracy
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +181,7 @@ async def run_hld(
         model = assign_architecture_layers(model)      # layer field for tiered rendering
         model = drop_operational_noise(model)          # remove load-gen / telemetry nodes
         model = assign_domains(model)                  # ensure every container has a group
+        model = consolidate_containers_for_abstraction(model)  # fold module hairball into domains
         model = reduce_edges_for_readability(model)    # transitive reduction + collapse
         model = curate_significant_edges(model)        # per-source fan-out cap (redundant-only)
         model = enforce_connectivity(model)            # R2-R5 repair: no floating subsystems
@@ -214,6 +217,14 @@ async def run_hld(
 
         content = diagrams[0]["content"] if diagrams else ""
 
+        accuracy = compute_accuracy(
+            "combined",
+            facts=slim_facts,
+            model=model,
+            validation_report=validation_report,
+            missing_ids=missing,
+        )
+
         result = {
             "output_type":        output_type,
             "content":            content,
@@ -222,6 +233,7 @@ async def run_hld(
             "review_trace":       [],
             "validation":         diagrams[0]["validation"] if diagrams else {},
             "validation_report":  validation_report,
+            "accuracy":           accuracy,
             "coverage":           {"missing_ids": missing},
             "saved_to":           None,
         }

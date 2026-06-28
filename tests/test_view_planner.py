@@ -18,8 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from doc_agent.tools.view_planner import (
-    plan_views, score_component, score_edge,
+    plan_views, plan_single_view, score_component, score_edge,
     MAX_NODES_PER_VIEW, MAX_EDGES_PER_VIEW, DRILL_MIN_COMPONENTS,
+    MAX_COMPONENTS_SINGLE,
 )
 
 _FAILURES: list[str] = []
@@ -265,6 +266,120 @@ def test_l2_ghost_nodes_for_cross_group_deps():
     else:
         # L2 might not be generated if group count is within budget — that's fine
         check("L2: no L2 generated (within budget, skip ghost check)", True)
+
+
+# ── plan_single_view (single readable diagram) ────────────────────────────────
+
+def test_single_view_one_diagram():
+    """plan_single_view always returns exactly one view, regardless of size."""
+    layers = ["presentation", "application", "domain", "infrastructure", "persistence"]
+    comps  = [_make_comp(f"c{i}", layers[i % len(layers)]) for i in range(25)]
+    vs = plan_single_view(_make_model(comps))
+    check("single: exactly one view", len(vs["views"]) == 1, str(len(vs["views"])))
+    check("single: no L2 anywhere", not any(v["level"] == "L2" for v in vs["views"]))
+
+
+def test_single_view_caps_components():
+    """More than the budget folds the tail; node count never exceeds the cap."""
+    comps = [_make_comp(f"c{i}", "application", members=i + 2) for i in range(30)]
+    vs = plan_single_view(_make_model(comps))
+    v  = vs["views"][0]
+    check("single: nodes <= budget", len(v["nodes"]) <= MAX_COMPONENTS_SINGLE, str(len(v["nodes"])))
+    check("single: folded tail recorded", v["omitted"]["nodes"] == 30 - MAX_COMPONENTS_SINGLE,
+          str(v["omitted"]["nodes"]))
+
+
+def test_single_view_real_components_not_aggregates():
+    """Nodes are real components (have a layer), not L1 aggregate boxes."""
+    comps = [_make_comp(f"c{i}", "application") for i in range(4)]
+    v = plan_single_view(_make_model(comps))["views"][0]
+    check("single: nodes are real (no is_aggregate)", not any(n.get("is_aggregate") for n in v["nodes"]))
+    check("single: nodes carry layer", all(n.get("layer") for n in v["nodes"]))
+
+
+def test_single_view_external_datastore_wired():
+    """A persistence component gets a requires edge to a database external."""
+    comps = [_make_comp("db", "persistence", has_db=True),
+             _make_comp("svc", "application")]
+    ext = [{"id": "ext_postgresql", "label": "PostgreSQL", "kind": "datastore",
+            "stereotype": "database"}]
+    v = plan_single_view(_make_model(comps), ext)["views"][0]
+    check("single: externals carried", v["externals"] == ext)
+    check("single: db edge wired",
+          any(e["from"] == "db" and e["to"] == "ext_postgresql" for e in v["edges"]),
+          str(v["edges"]))
+
+
+def test_single_view_service_external_not_floating():
+    """A service external is attached from a source component (never left floating)."""
+    comps = [_make_comp("svc", "application")]
+    ext = [{"id": "ext_openai", "label": "OpenAI", "kind": "external",
+            "stereotype": "infrastructure"}]
+    v = plan_single_view(_make_model(comps), ext)["views"][0]
+    check("single: service external has an incoming edge",
+          any(e["to"] == "ext_openai" for e in v["edges"]), str(v["edges"]))
+
+
+def test_single_view_empty():
+    """No components → no views."""
+    vs = plan_single_view({"components": [], "dependencies": [], "packages": []})
+    check("single: empty model → no views", vs["views"] == [])
+
+
+# ── architecture composition invariants (the anti-hairball guarantees) ────────
+
+def test_compose_datastores_funnel_through_one_representative():
+    """ALL datastores attach to a SINGLE data-access representative — never N×M.
+    This is the rule that removes the hairball: each datastore has exactly one inbound
+    edge, and every such edge originates from the same component."""
+    comps = [_make_comp("dom1", "domain", owns_entities=["A"]),
+             _make_comp("dom2", "domain", owns_entities=["B"]),
+             _make_comp("dom3", "domain", owns_entities=["C"]),
+             _make_comp("data", "persistence", has_db=True)]
+    ext = [{"id": "ext_neo4j", "label": "Neo4j", "kind": "datastore", "stereotype": "database"},
+           {"id": "ext_mongo", "label": "MongoDB", "kind": "datastore", "stereotype": "database"},
+           {"id": "ext_es", "label": "Elasticsearch", "kind": "datastore", "stereotype": "database"}]
+    v = plan_single_view(_make_model(comps), ext)["views"][0]
+    db_ids = {x["id"] for x in ext}
+    db_edges = [e for e in v["edges"] if e["to"] in db_ids]
+    sources = {e["from"] for e in db_edges}
+    check("compose: every datastore reached exactly once",
+          sorted(e["to"] for e in db_edges) == sorted(db_ids), str(db_edges))
+    check("compose: ALL datastores share ONE source (no N×M)",
+          len(sources) == 1, str(sources))
+    check("compose: the source is the data-access (persistence) component",
+          sources == {"data"}, str(sources))
+
+
+def test_compose_internal_edges_forward_and_budgeted():
+    """Internal edges are forward-only (tier(dst) >= tier(src)) and capped at ~1.5×nodes."""
+    import math as _math
+    from doc_agent.tools.architecture_model import _LAYER_ORDER
+    rank = {l: i for i, l in enumerate(_LAYER_ORDER)}
+    comps = [_make_comp("p", "presentation"), _make_comp("a", "application"),
+             _make_comp("d", "domain"), _make_comp("i", "infrastructure")]
+    # include a back-edge (infra → presentation) that must be dropped
+    deps = [_make_edge("p", "a", weight=5), _make_edge("a", "d", weight=4),
+            _make_edge("d", "i", weight=3), _make_edge("i", "p", weight=9)]
+    v = plan_single_view(_make_model(comps, deps))["views"][0]
+    by_id = {c["id"]: c for c in comps}
+    internal = [e for e in v["edges"] if e["to"] in by_id]
+    forward = all(rank[by_id[e["to"]]["layer"]] >= rank[by_id[e["from"]]["layer"]] for e in internal)
+    check("compose: all internal edges are forward (no back-edges)", forward, str(internal))
+    check("compose: high-weight back-edge i→p was dropped",
+          not any(e["from"] == "i" and e["to"] == "p" for e in internal), str(internal))
+    check("compose: internal edges within ~1.5×nodes budget",
+          len(internal) <= _math.ceil(1.5 * len(v["nodes"])), str(len(internal)))
+
+
+def test_compose_title_uses_system_label():
+    """The view's system_label comes from the model's package label (the repo name)."""
+    comps = [_make_comp("c0", "application")]
+    model = {"components": comps, "dependencies": [],
+             "packages": [{"id": "system", "label": "OpenMetadata", "rank": 0}]}
+    v = plan_single_view(model)["views"][0]
+    check("compose: system_label = repo name", v["system_label"] == "OpenMetadata",
+          v.get("system_label"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

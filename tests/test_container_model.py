@@ -2733,6 +2733,176 @@ def test_primary_service_owns_datastore():
     check("primary: picks the datastore owner (core)", primary and primary["id"] == "core", primary)
 
 
+# ── consolidate_containers_for_abstraction + path domains ─────────────────────
+
+def _many_app_containers(n, group=None, layer="application", kind="service"):
+    out = []
+    for i in range(n):
+        c = {"id": f"svc{i:02d}", "label": f"Svc{i:02d}", "kind": kind, "layer": layer}
+        if group is not None:
+            c["group"] = group(i) if callable(group) else group
+        out.append(c)
+    return out
+
+
+def test_consolidate_noop_under_window():
+    """≤12 containers: never consolidates (already readable)."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = _many_app_containers(6, group=lambda i: f"Dom{i % 3}")
+    model = _model_with_edges(conts)
+    result = consolidate_containers_for_abstraction(model)
+    check("consolidate: noop under window", len(result["containers"]["containers"]) == 6,
+          len(result["containers"]["containers"]))
+    check("consolidate: no represented marker when noop",
+          "_represented_unit_count" not in result, result.get("_represented_unit_count"))
+
+
+def test_consolidate_folds_domains_into_reps():
+    """24 app containers in 4 domains → 4 representative containers."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = _many_app_containers(24, group=lambda i: f"Domain {i % 4}")
+    model = _model_with_edges(conts)
+    result = consolidate_containers_for_abstraction(model)
+    out = result["containers"]["containers"]
+    groups = {c["group"] for c in out}
+    check("consolidate: 24→4 reps", len(out) == 4, len(out))
+    check("consolidate: 4 distinct domains", len(groups) == 4, groups)
+    check("consolidate: represented credits pre-fold count",
+          result.get("_represented_unit_count") == 24, result.get("_represented_unit_count"))
+    check("consolidate: rep description lists members",
+          all("modules:" in c.get("description", "") for c in out), [c.get("description") for c in out])
+
+
+def test_consolidate_remaps_edges_and_drops_selfloops():
+    """Intra-domain edges become self-loops on the rep and are dropped; cross-domain kept."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = _many_app_containers(24, group=lambda i: f"Domain {i % 4}")
+    # svc00 & svc04 are both Domain 0; svc01 is Domain 1 → cross-domain edge survives
+    rels = [
+        {"from": "svc00", "to": "svc04", "label": "calls"},   # intra Domain 0 → self-loop
+        {"from": "svc00", "to": "svc01", "label": "calls"},   # Domain0 → Domain1 (cross)
+    ]
+    model = _model_with_edges(conts, rels=rels)
+    result = consolidate_containers_for_abstraction(model)
+    pairs = {(r["from"], r["to"]) for r in result["containers"]["relationships"]}
+    check("consolidate: no self-loops after fold", all(f != t for f, t in pairs), pairs)
+    check("consolidate: cross-domain edge preserved (remapped)",
+          ("domain_0", "domain_1") in pairs, pairs)
+
+
+def test_consolidate_keeps_presentation_standalone():
+    """A web_app/presentation entrypoint is never folded into a domain rep."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = _many_app_containers(20, group="Plugins")
+    conts.append({"id": "frontend", "label": "Frontend", "kind": "web_app",
+                  "layer": "presentation", "group": "Plugins"})
+    model = _model_with_edges(conts)
+    result = consolidate_containers_for_abstraction(model)
+    ids = {c["id"] for c in result["containers"]["containers"]}
+    check("consolidate: frontend stays standalone", "frontend" in ids, ids)
+    check("consolidate: presentation not folded", any(c["id"] == "frontend"
+          and c.get("kind") == "web_app" for c in result["containers"]["containers"]), ids)
+
+
+def test_consolidate_folds_presentation_modules():
+    """GUI-app monorepo: '*UI' modules classify as presentation but must still fold;
+    only the actual entrypoint stays standalone (regression: whole presentation layer
+    was wrongly protected → nothing folded on PowerToys)."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = []
+    for i in range(16):  # all classify as presentation via the '... UI' name
+        conts.append({"id": f"mod{i:02d}_ui", "label": f"Module {i:02d} UI",
+                      "kind": "service", "layer": "presentation", "group": "Modules"})
+    for i in range(3):
+        conts.append({"id": f"set{i}", "label": f"Setting {i}", "kind": "service",
+                      "layer": "presentation", "group": "Settings"})
+    # a real entrypoint
+    conts.append({"id": "frontend", "label": "Frontend", "kind": "web_app",
+                  "layer": "presentation", "group": "Modules"})
+    model = _model_with_edges(conts)
+    result = consolidate_containers_for_abstraction(model)
+    out = {c["id"]: c for c in result["containers"]["containers"]}
+    check("consolidate: presentation modules folded (not 20 boxes)",
+          len(out) <= 4, sorted(out))
+    check("consolidate: entrypoint frontend stays standalone", "frontend" in out, sorted(out))
+    check("consolidate: a 'Modules' rep exists",
+          any(c.get("group") == "Modules" and "modules:" in c.get("description", "")
+              for c in result["containers"]["containers"]), sorted(out))
+
+
+def test_consolidate_skips_single_giant_group():
+    """One domain of N siblings would collapse to 1 box (<floor) → left untouched."""
+    from doc_agent.tools.container_model import consolidate_containers_for_abstraction
+    conts = _many_app_containers(20, group="OneBig")
+    model = _model_with_edges(conts)
+    result = consolidate_containers_for_abstraction(model)
+    check("consolidate: single giant group not over-collapsed",
+          len(result["containers"]["containers"]) == 20,
+          len(result["containers"]["containers"]))
+
+
+def test_path_domain_helper():
+    """_path_domain = topmost non-generic ancestor; groups deep-nested domain folders,
+    keeps generic-root siblings standalone."""
+    from doc_agent.tools.container_model import _path_domain
+    check("path: src/modules/x → modules", _path_domain("src/modules/fancyzones") == "modules",
+          _path_domain("src/modules/fancyzones"))
+    # deep nesting (the real PowerToys shape) still groups under the domain folder
+    check("path: src/modules/A/B/proj → modules (deep)",
+          _path_domain("src/modules/launcher/Plugins/Calculator") == "modules",
+          _path_domain("src/modules/launcher/Plugins/Calculator"))
+    check("path: src/common/Common.UI → common", _path_domain("src/common/Common.UI") == "common",
+          _path_domain("src/common/Common.UI"))
+    check("path: services/cart → standalone", _path_domain("services/cart") is None,
+          _path_domain("services/cart"))
+    check("path: src/services/cart → standalone (both generic)",
+          _path_domain("src/services/cart") is None, _path_domain("src/services/cart"))
+    check("path: src/runner → standalone (generic root)", _path_domain("src/runner") is None,
+          _path_domain("src/runner"))
+    check("path: top-level unit → standalone", _path_domain("runner") is None,
+          _path_domain("runner"))
+
+
+def test_assign_domains_uses_path_grouping():
+    """Path-based domains beat slug prefixes for monorepo layouts."""
+    from doc_agent.tools.container_model import assign_domains
+    conts = [
+        {"id": "fancyzones", "label": "FancyZones", "kind": "service", "layer": "application"},
+        {"id": "awake",      "label": "Awake",      "kind": "service", "layer": "application"},
+        {"id": "runner",     "label": "Runner",     "kind": "service", "layer": "application"},
+    ]
+    model = _model_with_edges(conts)
+    model["_container_paths"] = {
+        "fancyzones": "src/modules/fancyzones",
+        "awake":      "src/modules/awake",
+        "runner":     "src/runner",
+    }
+    result = assign_domains(model)
+    g = {c["id"]: c.get("group") for c in result["containers"]["containers"]}
+    check("path-domains: modules grouped together", g["fancyzones"] == g["awake"] == "Modules", g)
+    check("path-domains: runner standalone", g["runner"] == "Runner", g)
+
+
+def test_score_hld_credits_consolidated_coverage():
+    """End-to-end: a consolidated model scores abstraction AND coverage high."""
+    from doc_agent.tools.container_model import (
+        consolidate_containers_for_abstraction, validate_model,
+    )
+    from doc_agent.workflow.fidelity_scorer import _score_hld
+    conts = _many_app_containers(24, group=lambda i: f"Domain {i % 4}")
+    rels = [{"from": f"svc{i:02d}", "to": f"svc{(i + 1) % 24:02d}", "label": "calls"}
+            for i in range(24)]
+    model = _model_with_edges(conts, rels=rels)
+    model["_discovered_unit_count"] = 24
+    model = consolidate_containers_for_abstraction(model)
+    vr = validate_model(model)
+    sc = _score_hld({}, model, vr, [])
+    bd = sc["breakdown"]
+    check("score: abstraction high after consolidation", bd["abstraction"] >= 85, bd)
+    check("score: coverage NOT punished for abstracting", bd["coverage"] >= 85, bd)
+    check("score: validity not failed by consolidation", bd["validity"] >= 85, bd)
+
+
 def main():
     cases = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for case in cases:

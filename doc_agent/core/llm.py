@@ -9,8 +9,10 @@ import os
 import re
 import json
 import asyncio
+import contextvars
+import httpx
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from agent_framework.openai import OpenAIChatCompletionClient
 
 load_dotenv()
@@ -19,25 +21,122 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 CHAT_MODEL = "gemini-2.5-flash-lite"
 EMBED_MODEL = "gemini-embedding-001"
 
+# gemini-2.5-flash-lite input context window (tokens). Used only for the UI's
+# "context usage per call" gauge -- it is the per-call limit, not a daily quota.
+CONTEXT_LIMIT = 1_048_576
+
+# Per-request token-usage collector. Scoped with a ContextVar (not a module global)
+# because FastAPI serves requests concurrently and a global would blend the token
+# counts of two simultaneous generations together. Each API handler calls
+# start_run_metrics() at the top, every run_agent() records into the active
+# collector, and summarize_run_metrics() shapes the totals for the response.
+_run_metrics: contextvars.ContextVar = contextvars.ContextVar("run_metrics", default=None)
+
+
+def start_run_metrics() -> None:
+    """Begin a fresh per-request token-usage collector for this async context."""
+    _run_metrics.set({
+        "per_agent": {},
+        "calls": 0,
+        "input": 0,
+        "output": 0,
+        "total": 0,
+        "max_call_input": 0,
+    })
+
+
+def get_run_metrics():
+    """Return the active collector dict, or None if start_run_metrics() wasn't called."""
+    return _run_metrics.get()
+
+
+def _record_usage(agent_name: str, usage) -> None:
+    """Fold one Gemini response's usage_details into the active collector.
+
+    `usage` is the agent_framework UsageDetails dict (mapped straight from Gemini's
+    own response usage -- the authoritative count, not an estimate). No-ops when no
+    collector is active or the response carried no usage, so nothing ever breaks.
+    """
+    m = _run_metrics.get()
+    if not m or not usage:
+        return
+    i = usage.get("input_token_count") or 0
+    o = usage.get("output_token_count") or 0
+    t = usage.get("total_token_count") or (i + o)
+    m["calls"] += 1
+    m["input"] += i
+    m["output"] += o
+    m["total"] += t
+    m["max_call_input"] = max(m["max_call_input"], i)
+    a = m["per_agent"].setdefault(agent_name, {"calls": 0, "tokens": 0})
+    a["calls"] += 1
+    a["tokens"] += t
+
+
+def summarize_run_metrics() -> dict:
+    """Shape the active collector into the token_usage payload the UI renders.
+
+    Returns zeroed fields if no calls were recorded so the caller can attach it
+    unconditionally without guarding for None.
+    """
+    m = get_run_metrics() or {}
+    calls = m.get("calls", 0)
+    total = m.get("total", 0)
+    per_agent = sorted(
+        (
+            {
+                "name": name,
+                "tokens": v["tokens"],
+                "calls": v["calls"],
+                "pct": round(100 * v["tokens"] / total) if total else 0,
+            }
+            for name, v in m.get("per_agent", {}).items()
+        ),
+        key=lambda x: -x["tokens"],
+    )
+    max_call_input = m.get("max_call_input", 0)
+    return {
+        "model": CHAT_MODEL,
+        "total_tokens": total,
+        "input_tokens": m.get("input", 0),
+        "output_tokens": m.get("output", 0),
+        "llm_calls": calls,
+        "avg_tokens_per_call": round(total / calls, 1) if calls else 0,
+        "context_limit": CONTEXT_LIMIT,
+        "max_call_input": max_call_input,
+        "context_pct_per_call": round(100 * max_call_input / CONTEXT_LIMIT, 2),
+        "per_agent": per_agent,
+        "dashboard_url": "https://aistudio.google.com/usage",
+    }
+
 # Free-tier quota is 250k input tokens/minute; target a safety margin under it so
 # we pace ourselves before Gemini ever has to reject a call.
 _INPUT_TPM_BUDGET = 180_000
 _PROMPT_OVERHEAD_TOKENS = 4_000  # system instructions + framework overhead per call
 _MAX_CONCURRENT_CALLS = 3
+# The binding free-tier constraint for gemini-2.5-flash-lite is the REQUEST count,
+# not tokens — our prompts are small enough to never trip the token budget, yet a
+# multi-view run can fire 20+ tiny requests in a burst and hit the per-minute /
+# per-day request quota. So we also pace raw request count per rolling 60s. Free
+# tier is ~15 RPM; default to a margin under it. Override with GEMINI_MAX_RPM.
+_MAX_RPM = int(os.getenv("GEMINI_MAX_RPM", "12"))
 
 
 class _RateLimiter:
-    """Module-level rolling-60s token bucket plus a concurrency cap.
+    """Module-level rolling-60s token bucket + request-count bucket + concurrency cap.
 
-    Every run_agent() call estimates its input tokens and waits here until that
-    many tokens are available in the trailing 60s window. This makes a run
-    self-pace under the per-minute quota instead of firing ahead and reacting
-    to 429s after the fact.
+    Every run_agent() call estimates its input tokens and waits here until both
+    (a) that many tokens and (b) a request slot are available in the trailing 60s
+    window. This makes a run self-pace under the per-minute quota instead of firing
+    ahead and reacting to 429s after the fact. The request bucket is what keeps a
+    multi-view LLD run from bursting past the free-tier request cap.
     """
 
-    def __init__(self, budget: int):
+    def __init__(self, budget: int, rpm: int = _MAX_RPM):
         self._budget = budget
+        self._rpm = max(rpm, 1)
         self._usage: list[tuple[float, int]] = []  # (monotonic_time, tokens)
+        self._requests: list[float] = []           # request timestamps (60s window)
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_CALLS)
 
@@ -46,9 +145,24 @@ class _RateLimiter:
         self._usage = [(t, n) for t, n in self._usage if t > cutoff]
         return sum(n for _, n in self._usage)
 
+    def _prune_requests(self, now: float) -> int:
+        cutoff = now - 60.0
+        self._requests = [t for t in self._requests if t > cutoff]
+        return len(self._requests)
+
     async def acquire(self, tokens: int):
         await self._semaphore.acquire()
         async with self._lock:
+            # First gate: request-count per minute. Wait until a slot frees in the
+            # trailing 60s window before we even consider tokens.
+            while True:
+                now = asyncio.get_event_loop().time()
+                if self._prune_requests(now) < self._rpm:
+                    break
+                wait = max(self._requests[0] + 60.0 - now, 0.5)
+                await asyncio.sleep(min(wait, 5.0))
+
+            # Second gate: input tokens per minute.
             # A single call larger than the whole budget can never "fit"; pacing
             # cannot help it. Wait only for the window to drain to empty, then let
             # it through and rely on the 429 retry/backoff rather than hang forever.
@@ -58,12 +172,14 @@ class _RateLimiter:
                     await asyncio.sleep(min(self._usage[0][0] + 60.0 - now, 5.0))
                     now = asyncio.get_event_loop().time()
                 self._usage.append((now, tokens))
+                self._requests.append(now)
                 return
             while True:
                 now = asyncio.get_event_loop().time()
                 used = self._prune(now)
                 if used + tokens <= self._budget:
                     self._usage.append((now, tokens))
+                    self._requests.append(now)
                     return
                 oldest_time = self._usage[0][0] if self._usage else now
                 wait = max(oldest_time + 60.0 - now, 0.5)
@@ -87,11 +203,23 @@ def estimate_tokens(text: str) -> int:
 
 
 def build_agent(instructions: str, name: str):
-    """Build a Gemini-backed chat agent with the given instructions and name."""
-    return OpenAIChatCompletionClient(
+    """Build a Gemini-backed chat agent with the given instructions and name.
+
+    The client's HTTP timeouts are set explicitly: the OpenAI SDK defaults to a
+    5s connect timeout, which an intermittent network/DNS blip on a busy
+    multi-agent run can blow, surfacing as a misleading APITimeoutError. A 15s
+    connect window absorbs those blips; run_agent() retries any that remain.
+    OpenAIChatCompletionClient has no timeout kwarg, so we inject a
+    pre-configured AsyncOpenAI client via async_client.
+    """
+    async_client = AsyncOpenAI(
         base_url=GEMINI_BASE_URL,
         api_key=os.environ["GEMINI_API_KEY"],
+        timeout=httpx.Timeout(120.0, connect=15.0),
+    )
+    return OpenAIChatCompletionClient(
         model=CHAT_MODEL,
+        async_client=async_client,
     ).as_agent(name=name, instructions=instructions)
 
 
@@ -156,6 +284,10 @@ async def run_agent(
         try:
             try:
                 result = await agent.run(prompt)
+                # Capture Gemini's authoritative token count (not the rate-limiter
+                # estimate) attributed to this agent, for the per-run usage panel.
+                _record_usage(getattr(agent, "name", "unknown"),
+                              getattr(result, "usage_details", None))
                 return getattr(result, "text", str(result))
             finally:
                 _rate_limiter.release()
@@ -178,8 +310,13 @@ async def run_agent(
                     continue
                 # hard quota, or rate-limit retries exhausted
                 raise
-            # treat genuine transient server hiccups as retryable
-            if any(token in msg for token in ("500", "503", "unavailable", "high demand", "temporar")):
+            # treat genuine transient server hiccups as retryable. Timeouts
+            # (connect/read) are network blips, not logic errors -- a retry with
+            # backoff almost always succeeds, so don't 500 the whole run on one.
+            if any(token in msg for token in (
+                "500", "503", "unavailable", "high demand", "temporar",
+                "timed out", "timeout", "connecttimeout", "readtimeout",
+            )):
                 transient_attempt += 1
                 if transient_attempt >= max_retries:
                     raise last_exc
@@ -216,7 +353,7 @@ def extract_json(text: str) -> str:
     return s
 
 
-async def run_agent_json(agent, prompt: str, max_retries: int = 3, base_delay: float = 0.5,
+async def run_agent_json(agent, prompt: str, max_retries: int = 2, base_delay: float = 0.5,
                          fallback=None):
     """Run an agent and parse its reply as JSON, retrying when it isn't valid.
 

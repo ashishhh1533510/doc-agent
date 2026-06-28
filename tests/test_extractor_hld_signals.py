@@ -292,6 +292,28 @@ public class AppDb : DbContext
     check("csharp dbcontext still detected", "AppDb" in db_model_names(f), str(db_model_names(f)))
 
 
+def test_csharp_alias_using_resolves_to_target():
+    """Alias `using` directives must record the TARGET namespace, not the local alias
+    name — otherwise WinRT idioms leak bogus 'Deferral'/'Dispatcher' packages into the
+    dependency diagram (regression: alias name was emitted as an import)."""
+    src = """
+using Deferral = Windows.Foundation.Deferral;
+using Dispatcher = global::Microsoft.UI.Dispatching.DispatcherQueue;
+using CommunityToolkit.Mvvm.Input;
+namespace App { class C { } }
+"""
+    f = extract_from_csharp_source(src, "Aliases.cs")
+    imps = f["imports"]
+    check("csharp alias: no bare 'Deferral' import", "Deferral" not in imps, str(imps))
+    check("csharp alias: no bare 'Dispatcher' import", "Dispatcher" not in imps, str(imps))
+    check("csharp alias: target Windows.Foundation.Deferral recorded",
+          "Windows.Foundation.Deferral" in imps, str(imps))
+    check("csharp alias: global:: stripped from target",
+          "Microsoft.UI.Dispatching.DispatcherQueue" in imps, str(imps))
+    check("csharp alias: real lib still recorded",
+          "CommunityToolkit.Mvvm.Input" in imps, str(imps))
+
+
 # --------------------------------------------------------------------------- #
 def main():
     cases = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

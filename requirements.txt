@@ -18,4 +18,5 @@ tree-sitter-typescript
 tree-sitter-c-sharp
 tree-sitter-java
 networkx
+google-cloud-monitoring  # optional: "verified vs Google" call-count cross-check
 

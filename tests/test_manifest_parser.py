@@ -197,6 +197,54 @@ def test_csproj():
         check("csproj: Stripe dep captured",
               any("stripe" in dep.lower() for dep in result["dependencies"]),
               str(result["dependencies"]))
+        check("csproj: Web SDK is deployable", result["deployable"] is True, result)
+
+
+def test_csproj_winexe_is_deployable():
+    """WinUI/WPF desktop apps ship as WinExe — must be deployable (PowerToys modules)."""
+    with tempfile.TemporaryDirectory() as d:
+        csp = Path(d, "PowerLauncher.csproj")
+        csp.write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup><OutputType>WinExe</OutputType></PropertyGroup>\n'
+            '</Project>')
+        r = parse_manifest(str(csp))
+        check("csproj: WinExe is deployable", r["deployable"] is True, r)
+
+
+def test_csproj_test_project_not_deployable():
+    """MSTest/xUnit test runners build as Exe but are NOT deployment units."""
+    with tempfile.TemporaryDirectory() as d:
+        csp = Path(d, "FancyZones.UITests.csproj")
+        csp.write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>\n'
+            '  <ItemGroup><PackageReference Include="MSTest" /></ItemGroup>\n'
+            '</Project>')
+        r = parse_manifest(str(csp))
+        check("csproj: MSTest Exe is NOT deployable", r["deployable"] is False, r)
+
+    with tempfile.TemporaryDirectory() as d:
+        # name-suffix detection even without a recognized test package
+        csp = Path(d, "Common.Interop.UnitTests.csproj")
+        csp.write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>\n'
+            '</Project>')
+        r = parse_manifest(str(csp))
+        check("csproj: *UnitTests name is NOT deployable", r["deployable"] is False, r)
+
+
+def test_csproj_library_not_deployable():
+    """A plain class library (no OutputType) is not a deployment unit."""
+    with tempfile.TemporaryDirectory() as d:
+        csp = Path(d, "Settings.UI.Library.csproj")
+        csp.write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n'
+            '</Project>')
+        r = parse_manifest(str(csp))
+        check("csproj: library is NOT deployable", r["deployable"] is False, r)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -994,9 +994,9 @@ def _build_ownership_edges(
 
 # ── Hard-budget simplifier ────────────────────────────────────────────────────
 
-# High safety caps — the decision procedure in hld_pipeline.py (via c4_views.py)
-# handles per-diagram splitting, so we no longer drop containers here.
-# These caps only act as a last-resort guard against truly pathological models.
+# High safety caps — readability is handled upstream by
+# consolidate_containers_for_abstraction (folds large module sets into domain reps),
+# so these caps only act as a last-resort guard against truly pathological models.
 _CONTAINER_CAP = 64
 _TOTAL_NODES_CAP = 96
 
@@ -1770,6 +1770,10 @@ def validate_model(model: dict) -> dict:
     actors       = ctx.get("actors", [])
     ext_systems  = list(ctx.get("external_systems") or []) + list(cont.get("external_services") or [])
     discovered_unit_count = model.get("_discovered_unit_count", 0)
+    # Units represented in the diagram, crediting domain reps for the modules they
+    # fold in (set by consolidate_containers_for_abstraction). Falls back to the raw
+    # container count when no consolidation happened.
+    represented_unit_count = model.get("_represented_unit_count", 0) or len(containers)
 
     rel_endpoints: set[str] = set()
     for r in all_rels:
@@ -1810,6 +1814,7 @@ def validate_model(model: dict) -> dict:
         "avg_edges_per_container":      round(avg_edges, 2),
         "avg_edges_per_container_only": round(avg_edges_cont, 2),
         "discovered_unit_count":        discovered_unit_count,
+        "represented_unit_count":       represented_unit_count,
     }
 
     findings: list[dict] = []
@@ -1821,20 +1826,24 @@ def validate_model(model: dict) -> dict:
             "message": f"{n_containers} containers found but 0 relationships — diagram will be empty",
         })
 
-    # ── Rule 2: under-discovery — fusion found many units but few rendered ────
-    if discovered_unit_count >= 5 and n_containers <= 2:
+    # ── Rule 2: under-discovery — fusion found many units but few represented ──
+    # Judged on REPRESENTED units (containers + modules folded into domain reps), not
+    # the raw rendered count: deliberate consolidation legitimately lowers the box
+    # count while still representing every discovered unit. A genuine drop (no
+    # consolidation) leaves represented == n_containers, so it still trips this rule.
+    if discovered_unit_count >= 5 and represented_unit_count <= 2:
         findings.append({
             "level": "fail",
             "message": (
                 f"evidence fusion discovered {discovered_unit_count} deployable units "
-                f"but only {n_containers} container(s) rendered — likely under-discovery"
+                f"but only {represented_unit_count} represented — likely under-discovery"
             ),
         })
-    elif discovered_unit_count >= 5 and n_containers < 0.5 * discovered_unit_count:
+    elif discovered_unit_count >= 5 and represented_unit_count < 0.5 * discovered_unit_count:
         findings.append({
             "level": "fail",
             "message": (
-                f"only {n_containers}/{discovered_unit_count} discovered units rendered "
+                f"only {represented_unit_count}/{discovered_unit_count} discovered units represented "
                 f"— pipeline may be dropping containers"
             ),
         })
@@ -2231,6 +2240,15 @@ def build_candidate_model(
     actor_ids = {a["id"] for a in actors}
     all_candidate_ids = candidate_ids | infra_ids | actor_ids
 
+    # Per-container source path (relative to repo root) — consumed by assign_domains
+    # for path-based domain grouping of monorepos, then irrelevant to the renderer.
+    container_paths: dict[str, str] = {}
+    for mdir, nid in container_id_map.items():
+        try:
+            container_paths[nid] = os.path.relpath(mdir, repo_root_abs).replace("\\", "/")
+        except Exception:
+            container_paths[nid] = ""
+
     model = {
         "context": {
             "system_name": "",
@@ -2255,6 +2273,7 @@ def build_candidate_model(
         },
         "_candidate_ids": list(all_candidate_ids),
         "_discovered_unit_count": discovered_unit_count,
+        "_container_paths": container_paths,
         # Private fields consumed by infer_communication_graph; cleaned up there
         "_container_units": container_units,
         "_container_id_map": container_id_map,
@@ -2436,13 +2455,52 @@ def apply_enrichment(model: dict, enrichment: dict) -> dict:
 
 # ── assign_domains ────────────────────────────────────────────────────────────
 
+# Conventional monorepo *roots* whose immediate children are independent units
+# (microservices, packages) — units directly under these stay standalone. A folder
+# NOT in this set (modules/, plugins/, features/, integrations/, …) is treated as a
+# named domain whose sibling children belong together and can be consolidated.
+_GENERIC_ROOT_DIRS = frozenset({
+    "src", "source", "sources", "app", "apps", "lib", "libs", "pkg", "pkgs",
+    "packages", "services", "service", "cmd", "internal", "projects", "repos",
+})
+
+
+def _path_domain(rel_path: str) -> "str | None":
+    """Derive a domain name from a unit's repo-relative path, or None if standalone.
+
+    The domain is the TOPMOST non-generic ancestor folder — i.e. skip leading generic
+    monorepo roots (src/, packages/, …) then take the next segment. This groups every
+    unit nested under a named domain folder, no matter how deep:
+        src/modules/FancyZones/FancyZonesEditor → "modules"
+        src/modules/launcher/Plugins/Calc       → "modules"
+        src/common/Common.UI                    → "common"
+    A unit sitting *directly* under generic roots (or at the repo top) is standalone,
+    so genuine sibling services keep their own boxes:
+        services/cart  → None   (sibling of other independent services)
+        src/runner     → None   (direct child of a generic root)
+        runner         → None   (top-level unit)
+    """
+    segs = [s for s in (rel_path or "").replace("\\", "/").split("/") if s and s != "."]
+    if len(segs) < 2:
+        return None  # top-level unit → standalone
+    ancestors = segs[:-1]  # directories containing the unit dir
+    i = 0
+    while i < len(ancestors) and ancestors[i].lower() in _GENERIC_ROOT_DIRS:
+        i += 1
+    if i >= len(ancestors):
+        return None  # unit sits directly under generic root(s) → standalone
+    return ancestors[i]
+
+
 def assign_domains(model: dict) -> dict:
     """Ensure every container has a 'group' domain; fill gaps deterministically.
 
     Priority:
     1. LLM-assigned 'group' (set by apply_enrichment) — kept as-is.
-    2. Top-level folder prefix when it yields ≥2 distinct groups across containers.
-    3. Architectural layer name (from _node_layer) as stable fallback.
+    2. Path-based domain: the named folder grouping sibling units (src/modules/* →
+       "Modules"), used when it yields ≥2 groups with at least one multi-member group.
+    3. Top-level folder prefix when it yields ≥2 distinct groups across containers.
+    4. Architectural layer name (from _node_layer) as stable fallback.
 
     Datastores/queues with no 'group' inherit the domain of their most-connected
     container peer (via relationships). Shared datastores → "Shared Data".
@@ -2451,6 +2509,7 @@ def assign_domains(model: dict) -> dict:
     containers = cont.get("containers", [])
     databases  = cont.get("databases", [])
     rels       = cont.get("relationships", [])
+    paths      = model.get("_container_paths") or {}
 
     if not containers:
         return model
@@ -2465,11 +2524,29 @@ def assign_domains(model: dict) -> dict:
     # If every container has a unique prefix (flat microservices), fall back to layer.
     ungrouped = [c for c in containers if not c.get("group")]
     if ungrouped:
+        # Step 2a: path-based domains. Prefer this over slug prefixes — a real folder
+        # layout is a far stronger domain signal than a name prefix coincidence. Use it
+        # only when it actually clusters siblings (≥2 groups, ≥1 with >1 member).
+        path_groups: dict[str, str] = {}
+        for c in ungrouped:
+            dom = _path_domain(paths.get(c["id"], ""))
+            path_groups[c["id"]] = (dom or c["id"]).replace("-", " ").replace("_", " ").title()
+        distinct = set(path_groups.values())
+        members_per_group: dict[str, int] = {}
+        for g in path_groups.values():
+            members_per_group[g] = members_per_group.get(g, 0) + 1
+        use_path = (
+            len(distinct) >= 2
+            and any(n >= 2 for n in members_per_group.values())
+        )
+
         all_prefixes = {_folder_prefix(c["id"]) for c in containers}
         use_prefix = 2 <= len(all_prefixes) <= 6
 
         for c in ungrouped:
-            if use_prefix:
+            if use_path:
+                c["group"] = path_groups[c["id"]]
+            elif use_prefix:
                 c["group"] = _folder_prefix(c["id"]).replace("_", " ").title()
             else:
                 c["group"] = _node_layer(c).replace("_", " ").title()
@@ -2511,6 +2588,184 @@ def assign_domains(model: dict) -> dict:
         # no peers → leave unset (will be placed in tier by renderer)
 
     model["containers"] = cont
+    return model
+
+
+# ── consolidate_containers_for_abstraction ────────────────────────────────────
+
+# Readable container window (mirrors the fidelity scorer's _score_hld window). When
+# a model exceeds the upper bound it reads as a hairball; consolidation pulls it back
+# into the window by folding sibling modules of a domain into one representative.
+_ABSTRACTION_WINDOW_LO = 3
+_ABSTRACTION_WINDOW_HI = 12
+
+def consolidate_containers_for_abstraction(model: dict) -> dict:
+    """Collapse multi-member domain groups into one representative container.
+
+    C4 permits showing a group of closely-related containers as a single container.
+    On large monorepos (dozens of modules under src/modules, plugins/, …) rendering
+    one box per module is an unreadable hairball that scores ~0.3 on abstraction.
+    This deterministic pass folds the members of each domain group into a single
+    representative node when the model is over the readable window — turning "44
+    module boxes" into one "Modules" domain box.
+
+    Fires only when ALL hold (otherwise a no-op):
+      - container_count > _ABSTRACTION_WINDOW_HI
+      - ≥2 distinct domain groups exist
+      - at least one group has ≥2 foldable members
+      - the result keeps ≥_ABSTRACTION_WINDOW_LO containers (never over-collapses)
+
+    Only the actual ingress face is protected from folding: the single entrypoint
+    (so the actor→entry spine survives) and any gateway nodes (the front door). Every
+    other grouped container is foldable — including presentation/web_app modules,
+    because in a GUI-app monorepo (e.g. WinUI desktop) every module is presentation,
+    so protecting the whole layer would defeat consolidation entirely. Edges (context
+    + container), the protected spine markers, and _candidate_ids are all remapped to
+    the representative ids; self-loops and duplicates are dropped. Records
+    _represented_unit_count so the scorer credits the folded units as represented
+    (abstraction must not be punished by the coverage axis).
+    """
+    import logging as _log_cons
+    log = _log_cons.getLogger(__name__)
+
+    cont = model.get("containers", {})
+    containers = cont.get("containers", [])
+    if len(containers) <= _ABSTRACTION_WINDOW_HI:
+        return model
+
+    # Protect only the real ingress face: the single entrypoint + any gateways. These
+    # anchor the actor→entry→… spine and must stay individually visible.
+    entry = _pick_entrypoint(containers)
+    protected_ids: set[str] = {entry["id"]} if entry else set()
+    for c in containers:
+        if (c.get("layer") or _node_layer(c)) == "gateway":
+            protected_ids.add(c["id"])
+
+    # Partition into foldable grouped members vs. standalone (protected/ungrouped).
+    groups: dict[str, list[dict]] = {}
+    standalone: list[dict] = []
+    for c in containers:
+        grp = (c.get("group") or "").strip()
+        if grp and c["id"] not in protected_ids:
+            groups.setdefault(grp, []).append(c)
+        else:
+            standalone.append(c)
+
+    foldable_groups = {g: members for g, members in groups.items() if len(members) >= 2}
+    # Single-member foldable groups stay standalone (nothing to collapse).
+    for g, members in groups.items():
+        if len(members) < 2:
+            standalone.extend(members)
+
+    if len(foldable_groups) < 1:
+        return model
+
+    # Projected count after folding each multi-member group to one rep.
+    projected = len(standalone) + len(foldable_groups)
+    distinct_result_groups = len(foldable_groups) + len({
+        (c.get("group") or c["id"]) for c in standalone
+    })
+    if projected >= len(containers):
+        return model  # no reduction
+    if projected < _ABSTRACTION_WINDOW_LO:
+        return model  # would over-collapse below the readable floor
+    if distinct_result_groups < 2:
+        return model  # collapses everything into one box — not an improvement
+
+    # Build representatives + the member→rep id remap.
+    _KIND_PRIORITY = ["service", "web_app", "worker"]  # rep kind, deterministic
+    existing_ids = {c["id"] for c in containers}
+    id_remap: dict[str, str] = {}
+    rep_nodes: list[dict] = []
+    folded_total = 0
+
+    for grp, members in sorted(foldable_groups.items()):
+        rep_id = _slug(grp)
+        # Avoid colliding with a surviving standalone node id.
+        base_id = rep_id
+        n = 2
+        standalone_ids = {c["id"] for c in standalone}
+        while rep_id in standalone_ids:
+            rep_id = f"{base_id}_{n}"
+            n += 1
+        kinds = [m.get("kind", "service") for m in members]
+        rep_kind = next((k for k in _KIND_PRIORITY if k in kinds), sorted(kinds)[0])
+        techs = []
+        for m in members:
+            for t in (m.get("tech") or "").split(","):
+                t = t.strip()
+                if t and t not in techs:
+                    techs.append(t)
+        member_labels = [m.get("label", m["id"]) for m in members]
+        shown = ", ".join(member_labels[:5]) + ("…" if len(member_labels) > 5 else "")
+        rep = {
+            "id": rep_id,
+            "label": grp,
+            "kind": rep_kind,
+            "tech": ", ".join(techs[:4]),
+            "description": f"{len(members)} modules: {shown}",
+            "group": grp,
+        }
+        rep["layer"] = _node_layer(rep)
+        rep_nodes.append(rep)
+        for m in members:
+            id_remap[m["id"]] = rep_id
+        folded_total += len(members)
+
+    # New container set: standalone (unchanged) + representatives.
+    new_containers = standalone + rep_nodes
+    cont["containers"] = new_containers
+
+    # Remap edges in both relationship lists; drop self-loops, dedupe.
+    def _remap_rels(rels: list) -> list:
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        for r in (rels or []):
+            f = id_remap.get(r.get("from", ""), r.get("from", ""))
+            t = id_remap.get(r.get("to", ""), r.get("to", ""))
+            if f == t:
+                continue
+            if (f, t) in seen:
+                continue
+            seen.add((f, t))
+            nr = dict(r)
+            nr["from"], nr["to"] = f, t
+            out.append(nr)
+        return out
+
+    cont["relationships"] = _remap_rels(cont.get("relationships", []))
+    ctx = model.get("context", {})
+    ctx["relationships"] = _remap_rels(ctx.get("relationships", []))
+    model["context"] = ctx
+
+    # Remap the protected spine markers so reduce/curate still shield the spine.
+    spine = model.get("_spine_edges")
+    if spine:
+        model["_spine_edges"] = {
+            (id_remap.get(a, a), id_remap.get(b, b))
+            for (a, b) in spine
+            if id_remap.get(a, a) != id_remap.get(b, b)
+        }
+
+    # Keep grounding ids consistent (rep ids are legitimate, member ids gone).
+    cand = set(model.get("_candidate_ids") or [])
+    cand -= set(id_remap.keys())
+    cand |= {r["id"] for r in rep_nodes}
+    model["_candidate_ids"] = list(cand)
+
+    # The folded units are still REPRESENTED (via their domain rep) — record the
+    # pre-consolidation container count so coverage credits them and abstraction
+    # isn't punished for the very thing it rewards.
+    model["_represented_unit_count"] = max(
+        len(containers), model.get("_represented_unit_count", 0)
+    )
+
+    model["containers"] = cont
+    log.info(
+        "consolidate_containers_for_abstraction: %d containers → %d "
+        "(%d folded into %d domain rep(s))",
+        len(containers), len(new_containers), folded_total, len(rep_nodes),
+    )
     return model
 
 

@@ -33,6 +33,12 @@ _STDLIB_NOISE: frozenset[str] = frozenset({
     # JS / TS built-ins
     "fs", "path", "http", "https", "url", "util", "events", "stream", "buffer",
     "crypto", "assert", "process", "console", "child_process", "os", "cluster",
+    # Type-check-only stubs and platform/projection namespace roots — never real
+    # third-party dependencies (same rationale as the "java"/"kotlin" roots above):
+    #   _typeshed → typing stubs imported under `if TYPE_CHECKING:` (no runtime module)
+    #   windows   → WinRT / Win32 platform API root (C# `using Windows.*`)
+    #   abi       → WinRT projection artifact (C# `using ABI.*`), not a package
+    "_typeshed", "windows", "abi",
 })
 
 # Generic namespace prefixes that alone carry no architectural meaning.
@@ -59,6 +65,7 @@ _FRAMEWORK_MAP: list[tuple[str, str]] = sorted([
     ("com.google.inject",             "Guice"),
     ("com.amazonaws",                 "AWS SDK"),
     ("com.azure",                     "Azure SDK"),
+    ("communitytoolkit",              "CommunityToolkit"),
     ("jakarta.persistence",           "JPA"),
     ("javax.persistence",             "JPA"),
     ("jakarta.validation",            "Jakarta Validation"),
@@ -103,6 +110,62 @@ def _external_lib_key(imp: str) -> tuple[str, str] | None:
 
     # Simple non-namespaced import (Python/JS): keep as-is
     return low, imp.strip()
+
+
+def candidate_external_libs(rich_facts: dict) -> dict[str, str]:
+    """key -> label of every architecturally-significant external library derivable
+    from the repo's import evidence.
+
+    This is the *unbounded* candidate set the dependency builder selects from (it
+    later caps to MAX_EXTERNAL_PACKAGES and ranks by importing-component count). It
+    is exposed so the fidelity scorer can size its coverage denominator against the
+    SAME notion of "significant external" the builder uses — applying the identical
+    stdlib/internal filters and `_external_lib_key` mapping — so the two never drift.
+
+    Unlike build_dependency_model this needs no code_dir: it walks every file's raw
+    imports directly rather than mapping members to components.
+    """
+    import_graph: dict = rich_facts.get("import_graph", {}) or {}
+    internal_tops: set[str] = {mid.split("/")[0] for mid in import_graph if mid}
+
+    ns_roots: set[str] = set()
+    for f in rich_facts.get("files", []) or []:
+        ns = (f.get("namespace") or "").lower().strip()
+        if not ns:
+            continue
+        ns_roots.add(ns)
+        segs = ns.split(".")
+        for depth in range(1, min(4, len(segs))):
+            ns_roots.add(".".join(segs[:depth]))
+
+    def _is_internal(imp: str) -> bool:
+        low = imp.lower().strip()
+        if low.split(".")[0].split("/")[0] in internal_tops:
+            return True
+        return any(low == r or low.startswith(r + ".") for r in ns_roots)
+
+    out: dict[str, str] = {}
+    for f in rich_facts.get("files", []) or []:
+        if f.get("error"):
+            continue
+        for imp in f.get("imports", []) or []:
+            if not imp or imp.startswith("."):
+                continue
+            if _is_internal(imp):
+                continue
+            result = _external_lib_key(imp)
+            if result is None:
+                continue
+            key, label = result
+            out[key] = label
+    return out
+
+
+def internal_top_segments(rich_facts: dict) -> set[str]:
+    """Lowercased top-level path segments of the repo's own internal modules
+    (from import_graph keys) — the ground-truth set of internal package roots."""
+    import_graph: dict = rich_facts.get("import_graph", {}) or {}
+    return {mid.split("/")[0].lower() for mid in import_graph if mid}
 
 
 def _reachable_without(

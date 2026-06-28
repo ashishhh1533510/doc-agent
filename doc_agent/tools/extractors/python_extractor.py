@@ -14,6 +14,7 @@ the entry-point names and the new language/namespace keys differ.
 import ast
 import re
 import sys
+import warnings
 from pathlib import Path
 
 from doc_agent.tools.language_detector import SKIP_DIRS
@@ -215,7 +216,13 @@ def _django_routes(tree: ast.Module) -> list:
 
 def extract_from_python_source(source: str, filename: str = "<unknown>") -> dict:
     """Parse Python source text and return its FileFacts."""
-    tree = ast.parse(source, filename=filename)
+    # The analyzed repo is third-party code we only parse (never run). Its source
+    # may contain invalid string escapes (e.g. r'\d' written as '\d'), which make
+    # ast.parse emit SyntaxWarning. That's the target repo's lint, not ours, and it
+    # has no effect on the parse — suppress it so it doesn't flood our logs.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(source, filename=filename)
     functions, classes, routes = [], [], []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

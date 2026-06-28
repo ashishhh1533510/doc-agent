@@ -131,11 +131,45 @@ def _pyproject_is_deployable(path: Path) -> bool:
         return False
 
 
+_CSPROJ_TEST_MARKERS = (
+    "<istestproject>true",          # explicit MSBuild test flag
+    "microsoft.net.test.sdk",       # the .NET test host
+    'include="mstest"', "mstest.testframework",
+    "xunit", "nunit", "microsoft.testplatform",
+)
+
+
+def _csproj_is_test(text_lower: str, path: Path) -> bool:
+    """True if this .csproj is a test project (unit/UI/integration/fuzz/benchmark).
+
+    Test runners are built as `Exe` (so the test host can launch them) but are NOT
+    architectural deployment units — admitting them puts 'FancyZones UI Tests' boxes
+    in the diagram instead of the real modules. Detected via the MSBuild test flag,
+    a test-framework package reference, or the conventional project-name suffix.
+    """
+    if any(m in text_lower for m in _CSPROJ_TEST_MARKERS):
+        return True
+    stem = path.stem.lower()
+    return stem.endswith((
+        "tests", "test", "unittests", "uitests", "integrationtests",
+        "fuzztests", "benchmarks", "benchmark",
+    ))
+
+
 def _csproj_is_deployable(path: Path) -> bool:
-    """True if this .csproj targets an executable or web/worker SDK."""
+    """True if this .csproj targets an executable or web/worker SDK.
+
+    Excludes test projects: PowerToys-style WinUI/WPF apps ship as `WinExe`, while
+    MSTest/xUnit test runners also build as `Exe` — so without the test exclusion the
+    gate admits test harnesses and (before the WinExe fix) dropped the real modules.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-        if "<OutputType>Exe" in text or "<OutputType>exe" in text:
+        tl = text.lower()
+        if _csproj_is_test(tl, path):
+            return False
+        # WinExe = Windows GUI app (the real desktop modules); Exe = console app.
+        if "<outputtype>exe" in tl or "<outputtype>winexe" in tl:
             return True
         if "Microsoft.NET.Sdk.Web" in text or "Microsoft.NET.Sdk.Worker" in text:
             return True

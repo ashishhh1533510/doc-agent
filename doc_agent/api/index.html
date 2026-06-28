@@ -248,6 +248,140 @@
     font-family: var(--mono); font-size: 11px; color: var(--muted-2);
     margin-top: 7px; line-height: 1.5;
   }
+
+  /* token-usage panel (step D) */
+  .token-usage {
+    margin-top: 22px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+    animation: rise 0.4s ease both;
+  }
+  .tu-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--panel-2);
+  }
+  .tu-title {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  .tu-model {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    background: var(--accent-soft); border: 1px solid rgba(224,168,46,0.3);
+    padding: 2px 8px; border-radius: 5px;
+  }
+  .tu-link {
+    margin-left: auto;
+    font-family: var(--mono); font-size: 11px; color: var(--blue);
+    text-decoration: none;
+  }
+  .tu-link:hover { text-decoration: underline; }
+
+  .tu-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 1px;
+    background: var(--border-soft);
+  }
+  .tu-card { background: var(--panel); padding: 13px 14px; }
+  .tu-card .k {
+    font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted-2); margin-bottom: 6px;
+  }
+  .tu-card .v {
+    font-family: var(--mono); font-size: 19px; font-weight: 600; color: var(--text);
+    line-height: 1.1;
+  }
+  .tu-card .v small { font-size: 11px; font-weight: 400; color: var(--muted); }
+  .tu-card .sub {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); margin-top: 5px;
+  }
+  .tu-verify { display: inline-flex; align-items: center; gap: 5px; }
+  .tu-verify.match { color: var(--green); }
+  .tu-verify.pending { color: var(--muted-2); }
+
+  .tu-gauge {
+    height: 4px; border-radius: 3px; background: var(--border);
+    margin-top: 8px; overflow: hidden;
+  }
+  .tu-gauge > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+  .tu-agents { padding: 14px 16px 16px; }
+  .tu-agents .k {
+    font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted-2); margin-bottom: 10px;
+  }
+  .tu-agent { margin-bottom: 9px; }
+  .tu-agent:last-child { margin-bottom: 0; }
+  .tu-agent .row {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-family: var(--mono); font-size: 11.5px; margin-bottom: 4px;
+  }
+  .tu-agent .row .name { color: var(--text); word-break: break-all; }
+  .tu-agent .row .amt { color: var(--muted); white-space: nowrap; }
+  .tu-bar { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .tu-bar > span { display: block; height: 100%; background: var(--blue); border-radius: 3px; }
+
+  /* diagram-fidelity panel */
+  .accuracy {
+    margin-top: 22px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+    animation: rise 0.4s ease both;
+  }
+  .acc-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--panel-2);
+  }
+  .acc-title {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  .acc-score { font-family: var(--mono); font-size: 22px; font-weight: 600; line-height: 1; }
+  .acc-score small { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .acc-grade {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 3px 9px; border-radius: 5px; letter-spacing: 0.03em;
+  }
+  .acc-grade.high { color: var(--green); background: rgba(94,194,122,0.12); border: 1px solid rgba(94,194,122,0.35); }
+  .acc-grade.moderate { color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(224,168,46,0.35); }
+  .acc-grade.low { color: var(--red); background: rgba(224,97,79,0.1); border: 1px solid rgba(224,97,79,0.35); }
+  .acc-axes { padding: 14px 16px 4px; }
+  .acc-axis { margin-bottom: 13px; }
+  .acc-axis .row {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-family: var(--mono); font-size: 11.5px; margin-bottom: 5px;
+  }
+  .acc-axis .row .lbl { color: var(--text); }
+  .acc-axis .row .lbl .wt { color: var(--muted-2); }
+  .acc-axis .row .val { color: var(--muted); }
+  .acc-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .acc-bar > span { display: block; height: 100%; border-radius: 3px; }
+  .acc-bar > span.g { background: var(--green); }
+  .acc-bar > span.m { background: var(--accent); }
+  .acc-bar > span.l { background: var(--red); }
+  .acc-notes {
+    padding: 6px 16px 16px;
+  }
+  .acc-notes summary {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    cursor: pointer; list-style: none; padding: 6px 0;
+  }
+  .acc-notes summary::-webkit-details-marker { display: none; }
+  .acc-notes summary::before { content: "▸ "; color: var(--muted-2); }
+  .acc-notes[open] summary::before { content: "▾ "; }
+  .acc-notes ul { margin: 4px 0 0; padding-left: 18px; }
+  .acc-notes li {
+    font-family: var(--mono); font-size: 11px; color: var(--muted-2);
+    line-height: 1.6; word-break: break-word;
+  }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
@@ -297,9 +431,13 @@
             <option value="lld_dependency">Dependency diagram</option>
           </optgroup>
 
+          <!-- QA agent shelved — re-enable this optgroup, the question-field below,
+               and the `ask` entry in ACTIONS to restore Q&A. -->
+          <!--
           <optgroup label="Q&amp;A">
             <option value="ask">Ask a question</option>
           </optgroup>
+          -->
         </select>
         <div class="cost" id="cost"><span class="dot"></span><span id="cost-text"></span></div>
       </div>
@@ -315,10 +453,12 @@
         <input id="output" type="text" spellcheck="false" placeholder="output.md" />
       </div>
 
+      <!-- QA agent shelved.
       <div class="field" id="question-field" style="display:none">
         <label class="field-label" for="question">Question</label>
         <textarea id="question" placeholder="How does session handling work?"></textarea>
       </div>
+      -->
 
       <div class="field">
         <label class="field-label" for="token">Private repo token <span style="text-transform:none;letter-spacing:0">(optional)</span></label>
@@ -340,6 +480,8 @@
       <div id="result-container">
         <div class="empty">Run an action to see the response here.</div>
       </div>
+      <div id="accuracy" class="accuracy" style="display:none"></div>
+      <div id="token-usage" class="token-usage" style="display:none"></div>
     </section>
   </div>
 
@@ -350,7 +492,8 @@
     readme_yaml:   { path: "/generate/readme/yaml", mode: "gen", cost: 0,  out: "facts.yaml" },
     readme_md:     { path: "/generate/readme/md",   mode: "gen", cost: 3,  out: "README.md" },
     readme_html:   { path: "/generate/readme/html", mode: "gen", cost: 3,  out: "readme.html" },
-    ask:           { path: "/ask",                   mode: "ask", cost: 1,  out: "" },
+    // QA agent shelved.
+    // ask:           { path: "/ask",                   mode: "ask", cost: 1,  out: "" },
     hld2_combined:  { path: "/generate/hld2/", mode: "gen", param: {output_type: "combined"},  cost: 4, out: "hld_combined.mmd" },
     lld_class:      { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "class"},      cost: 4, out: "lld_class.mmd" },
     lld_sequence:   { path: "/generate/lld/",  mode: "gen", param: {diagram_type: "sequence"},   cost: 4, out: "lld_sequence.mmd" },
@@ -380,7 +523,9 @@
   function syncAction() {
     const a = ACTIONS[$("action").value];
     $("output-field").style.display   = a.mode === "ask" ? "none" : "block";
-    $("question-field").style.display = a.mode === "ask" ? "block" : "none";
+    // QA agent shelved — question-field removed from the DOM, so guard the lookup.
+    const qf = $("question-field");
+    if (qf) qf.style.display = a.mode === "ask" ? "block" : "none";
     $("output").placeholder = a.out || "output";
     const [cls, text] = COST_TEXT[a.cost];
     $("cost").className = "cost " + cls;
@@ -413,6 +558,8 @@
     $("reqline").innerHTML = `<span class="verb">POST</span> ${url}`;
     setStatus("running", "running…");
     $("download").style.display = "none";
+    $("token-usage").style.display = "none";
+    $("accuracy").style.display = "none";
     $("run").disabled = true;
     $("run").innerHTML = '<span class="spinner"></span>working';
     $("result-container").innerHTML = '<div class="empty">Working… md and html take a few seconds (multiple AI calls); a sleeping server can take 30–60s to wake.</div>';
@@ -436,6 +583,9 @@
       try { parsed = JSON.parse(raw); pretty = JSON.stringify(parsed, null, 2); } catch (_) {}
 
       setStatus(res.ok ? "ok" : "err", res.status + " " + res.statusText);
+
+      if (res.ok && parsed && parsed.accuracy) renderAccuracy(parsed.accuracy);
+      if (res.ok && parsed && parsed.token_usage) renderTokenUsage(parsed.token_usage, base);
 
       // Check for backend errors
       if (res.ok && parsed && parsed.error) {
@@ -599,6 +749,127 @@
     URL.revokeObjectURL(url);
   }
   function flash(kind, text) { setStatus(kind, text); }
+
+  // --- diagram-fidelity panel ---------------------------------------------
+  function renderAccuracy(a) {
+    const el = $("accuracy");
+    if (!a || a.breakdown == null) { el.style.display = "none"; return; }
+
+    const grade = (a.grade || "Low").toLowerCase();          // high | moderate | low
+    const cls = grade === "high" ? "g" : grade === "moderate" ? "m" : "l";
+    const w = a.weights || {};
+    // Per-type axis sets vary (e.g. dependency has connectivity, sequence has flow),
+    // so render whatever axes the score carries instead of three hardcoded bars.
+    const prettyAxis = (k) => k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    const axisRow = (key, label) => {
+      const v = (a.breakdown || {})[key] ?? 0;
+      const bar = v >= 85 ? "g" : v >= 60 ? "m" : "l";
+      return `
+        <div class="acc-axis">
+          <div class="row">
+            <span class="lbl">${label}${w[key] != null ? ` <span class="wt">· ${w[key]}% weight</span>` : ""}</span>
+            <span class="val">${v}/100</span>
+          </div>
+          <div class="acc-bar"><span class="${bar}" style="width:${Math.max(1, v)}%"></span></div>
+        </div>`;
+    };
+
+    const notes = (a.notes || []);
+    const notesBlock = notes.length ? `
+      <details class="acc-notes">
+        <summary>${notes.length} note${notes.length === 1 ? "" : "s"}</summary>
+        <ul>${notes.map((n) => `<li>${String(n).replace(/</g, "&lt;")}</li>`).join("")}</ul>
+      </details>` : "";
+
+    el.innerHTML = `
+      <div class="acc-head">
+        <span class="acc-title">Diagram fidelity</span>
+        <span class="acc-grade ${grade}">${a.grade || "—"}</span>
+        <span class="acc-score" style="margin-left:auto">${a.score}<small>/100</small></span>
+      </div>
+      <div class="acc-axes">
+        ${Object.keys(a.breakdown || {}).map((key) => axisRow(key, prettyAxis(key))).join("")}
+      </div>
+      ${notesBlock}`;
+    el.style.display = "block";
+  }
+
+  // --- token-usage panel (step D) -----------------------------------------
+  const fmtN = (n) => (n == null ? "—" : Number(n).toLocaleString());
+
+  function renderTokenUsage(u, base) {
+    const el = $("token-usage");
+    // Nothing was generated (e.g. 0 LLM calls) — keep the panel out of the way.
+    if (!u || !u.llm_calls) { el.style.display = "none"; return; }
+
+    const agents = (u.per_agent || []).map((a) => `
+      <div class="tu-agent">
+        <div class="row"><span class="name">${a.name}</span>
+          <span class="amt">${fmtN(a.tokens)} tok · ${a.calls} call${a.calls === 1 ? "" : "s"} · ${a.pct}%</span></div>
+        <div class="tu-bar"><span style="width:${Math.max(2, a.pct)}%"></span></div>
+      </div>`).join("");
+
+    el.innerHTML = `
+      <div class="tu-head">
+        <span class="tu-title">Token usage</span>
+        <span class="tu-model">${u.model || "model"}</span>
+        ${u.dashboard_url ? `<a class="tu-link" href="${u.dashboard_url}" target="_blank" rel="noopener">Gemini dashboard ↗</a>` : ""}
+      </div>
+      <div class="tu-grid">
+        <div class="tu-card"><div class="k">Total tokens</div><div class="v">${fmtN(u.total_tokens)}</div></div>
+        <div class="tu-card"><div class="k">Input</div><div class="v">${fmtN(u.input_tokens)}</div></div>
+        <div class="tu-card"><div class="k">Output</div><div class="v">${fmtN(u.output_tokens)}</div></div>
+        <div class="tu-card">
+          <div class="k">LLM calls</div><div class="v">${fmtN(u.llm_calls)}</div>
+          <div class="sub" id="tu-verify"></div>
+        </div>
+        <div class="tu-card"><div class="k">Avg / call</div><div class="v">${fmtN(u.avg_tokens_per_call)} <small>tok</small></div></div>
+        <div class="tu-card">
+          <div class="k">Context / call</div>
+          <div class="v">${u.context_pct_per_call}<small>%</small></div>
+          <div class="tu-gauge"><span style="width:${Math.min(100, Math.max(1, u.context_pct_per_call))}%"></span></div>
+          <div class="sub">${fmtN(u.max_call_input)} / ${fmtN(u.context_limit)}</div>
+        </div>
+      </div>
+      ${agents ? `<div class="tu-agents"><div class="k">Per-agent breakdown</div>${agents}</div>` : ""}`;
+
+    el.style.display = "block";
+    verifyCalls(base, u);
+  }
+
+  // Cross-check our recorded call count against Google's own Cloud Monitoring
+  // figure. Best-effort: stays silent unless GCP is configured. Cloud Monitoring
+  // lags ~1-4 min, so a lower/zero figure right after a run is ingestion lag,
+  // not a real mismatch — we label it accordingly rather than crying wolf.
+  async function verifyCalls(base, u) {
+    const slot = $("tu-verify");
+    if (!slot || !u.window) return;
+    slot.className = "tu-verify pending";
+    slot.textContent = "checking Google…";
+    try {
+      const res = await fetch(base + "/metrics/verify-calls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start: u.window.start, end: u.window.end }),
+      });
+      const data = await res.json();
+      if (!data.configured) { slot.textContent = ""; slot.className = "tu-verify"; return; }
+      const g = data.google_call_count;
+      if (g == null || g === 0) {
+        slot.className = "tu-verify pending";
+        slot.textContent = "Google: pending (ingestion lag)";
+      } else if (g >= u.llm_calls) {
+        slot.className = "tu-verify match";
+        slot.textContent = "✓ matches Google (" + g + ")";
+      } else {
+        slot.className = "tu-verify pending";
+        slot.textContent = "Google: " + g + " so far (lag)";
+      }
+    } catch (_) {
+      slot.textContent = "";
+      slot.className = "tu-verify";
+    }
+  }
 
   $("run").addEventListener("click", run);
   // Ctrl/Cmd+Enter to run

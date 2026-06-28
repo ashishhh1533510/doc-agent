@@ -571,6 +571,66 @@ def test_internal_namespace_exclusion():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Test 12 — Noise filtering: type-check-only stubs + platform/projection roots are
+# never external packages; known frameworks keep correct casing.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_noise_filtering_and_labels():
+    """`_typeshed` (TYPE_CHECKING stub), `Windows.*` / `ABI.*` (WinRT platform &
+    projection roots) must NOT surface as external libraries; real deps survive and
+    CommunityToolkit.* is labelled 'CommunityToolkit' (not '.capitalize()'d)."""
+    with tempfile.TemporaryDirectory() as code_dir:
+        src_dir = Path(code_dir) / "src"
+        src_dir.mkdir()
+        (src_dir / "transport.py").write_text("")
+        (src_dir / "ui.cs").write_text("")
+
+        mid_py = "src/transport"
+        mid_cs = "src/ui"
+        components = [
+            _make_component("transport", "Transport", 4, members=[mid_py]),
+            _make_component("ui",        "UI",        3, members=[mid_cs]),
+        ]
+        files = [
+            {
+                "file": str(src_dir / "transport.py"),
+                "language": "python",
+                # _typeshed / _typeshed.wsgi arrive from `if TYPE_CHECKING:` blocks
+                "imports": ["httpcore", "certifi", "_typeshed", "_typeshed.wsgi"],
+                "routes": [], "classes": [], "functions": [],
+                "error": None, "namespace": None,
+            },
+            {
+                "file": str(src_dir / "ui.cs"),
+                "language": "csharp",
+                "imports": [
+                    "Windows.Foundation",            # platform root → noise
+                    "ABI.Windows.UI.Xaml",           # projection artifact → noise
+                    "CommunityToolkit.Mvvm.Input",   # real dep, must keep casing
+                ],
+                "routes": [], "classes": [], "functions": [],
+                "error": None, "namespace": None,
+            },
+        ]
+        import_graph = {mid_py: [], mid_cs: []}
+        rich = _make_rich_facts(files=files, import_graph=import_graph)
+        named = _make_named_model(components, [])
+
+        model = build_dependency_model(named, rich, code_dir)
+
+    ext_labels = {p["label"] for p in model["packages"] if p["kind"] == "external"}
+
+    check("noise: _typeshed not external", "_typeshed" not in ext_labels, str(ext_labels))
+    check("noise: Windows platform root not external", "Windows" not in ext_labels, str(ext_labels))
+    check("noise: ABI projection root not external", "Abi" not in ext_labels, str(ext_labels))
+    check("noise: real dep httpcore present", "httpcore" in ext_labels, str(ext_labels))
+    check("noise: real dep certifi present", "certifi" in ext_labels, str(ext_labels))
+    check("noise: CommunityToolkit correctly cased",
+          "CommunityToolkit" in ext_labels and "Communitytoolkit" not in ext_labels,
+          str(ext_labels))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # main
 # ══════════════════════════════════════════════════════════════════════════════
 

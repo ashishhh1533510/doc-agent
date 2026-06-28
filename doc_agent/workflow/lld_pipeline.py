@@ -25,18 +25,21 @@ from doc_agent.tools.output import (
     render_component_plantuml, plantuml_server_url,
     render_component_view_set,
 )
-from doc_agent.tools.view_planner import plan_views
+from doc_agent.tools.view_planner import plan_single_view
 from doc_agent.agents.arch_context import ArchitectureContextAgent
 from doc_agent.agents.lld_agents import (
     ClassDiagramAgent, SequenceDiagramAgent,
     ComponentDiagramAgent, DependencyDiagramAgent,
 )
-from doc_agent.tools.component_arch import discover_components, validate_architecture_model
+from doc_agent.tools.component_arch import (
+    discover_components, validate_architecture_model, discover_external_systems,
+)
 from doc_agent.tools.dependency_graph import build_dependency_model
 
 from doc_agent.agents.lld_reviewer import LLDReviewerAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
 from doc_agent.workflow.grounding import check_grounding
+from doc_agent.workflow.fidelity_scorer import compute_accuracy
 
 
 
@@ -95,6 +98,75 @@ def _slim_for_lld(rich_facts: dict, files_override: list | None = None) -> dict:
         "files_omitted": omitted,
     }
     return budget_facts_blob(blob)
+
+async def _render_class_view(view: dict, model: dict) -> dict:
+    content = render_class_diagram(model)
+    return {
+        "label": model.get("label") or view.get("label", ""),
+        "content": content,
+        "validation": validate_mermaid(content),
+    }
+
+
+async def _refine_class_views(views: list, arch_ctx: dict) -> list:
+    """Refine all class views with the FEWEST possible LLM requests.
+
+    With >1 view we make exactly ONE batched call. If that batch fails we render
+    the deterministic candidate views directly (they are already complete and
+    renderable — only LLM naming is lost) rather than fanning out one request per
+    view. That fan-out is what let a single run burst past the free-tier request
+    quota; we never do it for multi-view runs. A single view costs one call."""
+    if not views:
+        return []
+    if len(views) > 1:
+        try:
+            refined = await ClassDiagramAgent().refine_many(views, arch_ctx)
+        except Exception:
+            refined = None
+        if refined and len(refined) == len(views):
+            return [await _render_class_view(v, m) for v, m in zip(views, refined)]
+        # Batch failed — degrade to deterministic candidates (0 extra requests)
+        # instead of N parallel refine calls.
+        return [await _render_class_view(v, v) for v in views]
+
+    agent = ClassDiagramAgent()
+    model = await agent.refine(views[0], arch_ctx)
+    return [await _render_class_view(views[0], model)]
+
+
+async def _render_seq_view(cand: dict, model: dict) -> dict:
+    content = render_sequence_diagram(model)
+    return {
+        "label": model.get("name") or cand.get("name", ""),
+        "content": content,
+        "validation": validate_mermaid(content),
+    }
+
+
+async def _refine_sequence_views(candidates: list, arch_ctx: dict) -> list:
+    """Refine all sequence workflows with the FEWEST possible LLM requests.
+
+    With >1 candidate we make exactly ONE batched call. If that batch fails we
+    render the deterministic candidates directly (participants/messages are
+    already final — only naming is lost) instead of fanning out one request per
+    candidate, which is what let a run burst past the free-tier request quota.
+    A single candidate costs one call."""
+    if not candidates:
+        return []
+    if len(candidates) > 1:
+        try:
+            refined = await SequenceDiagramAgent().refine_many(candidates, arch_ctx)
+        except Exception:
+            refined = None
+        if refined and len(refined) == len(candidates):
+            return [await _render_seq_view(c, m) for c, m in zip(candidates, refined)]
+        # Batch failed — degrade to deterministic candidates (0 extra requests).
+        return [await _render_seq_view(c, c) for c in candidates]
+
+    agent = SequenceDiagramAgent()
+    model = await agent.refine(candidates[0], arch_ctx)
+    return [await _render_seq_view(candidates[0], model)]
+
 
 async def _review_once(lld_agent, reviewer, facts, arch_ctx, model, diagram_type):
     """One review; a single revise only if the reviewer or grounding rejects it."""
@@ -162,20 +234,7 @@ async def run_lld(
             graph = build_class_graph(rich_facts)
             views = plan_class_views(graph)
 
-            async def _do_view(view):
-                agent = ClassDiagramAgent()          # fresh per task (parallel-safe)
-                model = await agent.refine(view, arch_ctx)
-                content = render_class_diagram(model)
-                return {
-                    "label": model.get("label") or view.get("label", ""),
-                    "content": content,
-                    "validation": validate_mermaid(content),
-                }
-
-            all_diagrams = (
-                list(await asyncio.gather(*[_do_view(v) for v in views]))
-                if views else []
-            )
+            all_diagrams = await _refine_class_views(views, arch_ctx)
             primary = all_diagrams[0]["content"] if all_diagrams else ""
             result = {
                 "diagram_type": "class",
@@ -184,31 +243,20 @@ async def run_lld(
                 "arch_context": arch_ctx,
                 "review_trace": [],
                 "validation": validate_mermaid(primary),
+                "accuracy": compute_accuracy(
+                    "class", facts=rich_facts, diagrams=all_diagrams, content=primary
+                ),
                 "saved_to": None,
             }
             if output_path and primary:
                 result["saved_to"] = save_text(output_path, primary)
             return result
 
-            # single partition — fall through to standard flow below
-                    # ── Sequence diagram: call-graph trace → bounded workflows ──
+        # ── Sequence diagram: call-graph trace → bounded workflows ──
         if diagram_type == "sequence":
             candidates = plan_sequence_views(rich_facts)
 
-            async def _do_seq(cand):
-                agent = SequenceDiagramAgent()      # fresh per task (parallel-safe)
-                model = await agent.refine(cand, arch_ctx)
-                content = render_sequence_diagram(model)
-                return {
-                    "label": model.get("name") or cand.get("name", ""),
-                    "content": content,
-                    "validation": validate_mermaid(content),
-                }
-
-            all_diagrams = (
-                list(await asyncio.gather(*[_do_seq(c) for c in candidates]))
-                if candidates else []
-            )
+            all_diagrams = await _refine_sequence_views(candidates, arch_ctx)
             primary = all_diagrams[0]["content"] if all_diagrams else ""
             result = {
                 "diagram_type": "sequence",
@@ -217,6 +265,10 @@ async def run_lld(
                 "arch_context": arch_ctx,
                 "review_trace": [],
                 "validation": validate_mermaid(primary),
+                "accuracy": compute_accuracy(
+                    "sequence", facts=rich_facts, arch_ctx=arch_ctx,
+                    diagrams=all_diagrams, content=primary
+                ),
                 "saved_to": None,
             }
             if output_path and primary:
@@ -230,7 +282,8 @@ async def run_lld(
                 checks  = validate_architecture_model(candidate, rich_facts)
                 agent   = ComponentDiagramAgent()
                 model   = await agent.refine(candidate, arch_ctx)
-                viewset = plan_views(model)
+                externals = discover_external_systems(rich_facts)
+                viewset = plan_single_view(model, externals)
                 views   = render_component_view_set(viewset)
 
                 # Back-compat top-level fields = L1 overview
@@ -260,6 +313,10 @@ async def run_lld(
                     "arch_context": arch_ctx,
                     "review_trace": [],
                     "validation":   checks,
+                    "accuracy":     compute_accuracy(
+                        "component", facts=rich_facts, model=model,
+                        content=content, arch_checks=checks
+                    ),
                     "saved_to":     None,
                 }
                 if output_path and content:
@@ -275,12 +332,19 @@ async def run_lld(
                 named   = await agent.refine(candidate, arch_ctx)
                 model   = build_dependency_model(named, rich_facts, code_dir)
                 content = render_dependency_diagram(model)
+                dep_validation = validate_mermaid(content)
                 result  = {
                     "diagram_type": "dependency",
                     "content":      content,
                     "arch_context": arch_ctx,
                     "review_trace": [],
-                    "validation":   validate_mermaid(content),
+                    "validation":   dep_validation,
+                    "accuracy":     compute_accuracy(
+                        "dependency",
+                        facts={**rich_facts, "components": named.get("components", [])},
+                        model=model,
+                        content=content, mermaid_validation=dep_validation
+                    ),
                     "saved_to":     None,
                 }
                 if output_path and content:
@@ -302,6 +366,10 @@ async def run_lld(
             "arch_context": arch_ctx,
             "review_trace": trace,
             "validation": validation,
+            "accuracy": compute_accuracy(
+                diagram_type, facts=slim_facts, arch_ctx=arch_ctx, model=model,
+                content=content, mermaid_validation=validation,
+            ),
             "saved_to": None,
         }
         if output_path and content:

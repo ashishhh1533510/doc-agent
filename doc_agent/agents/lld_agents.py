@@ -5,6 +5,7 @@ Each agent receives RichFacts + ArchitectureContext and produces a typed JSON mo
 Each also has a revise() method for the iteration loop in lld_pipeline.py.
 """
 
+from collections import Counter
 from doc_agent.core.llm import build_agent, run_agent_json, compact_json
 
 # ---------------------------------------------------------------------------
@@ -144,6 +145,34 @@ Return ONLY this JSON:
 # Sequence Diagram Agent
 # ---------------------------------------------------------------------------
 
+INSTRUCTIONS_SEQUENCE_REFINE_BATCH = """You are a software architect refining SEVERAL pre-traced sequence diagrams in a
+single pass. You receive a JSON array of CandidateSequences — each with participants
+and an ORDERED message list already extracted deterministically from the real call
+graph — plus one shared ArchitectureContext.
+
+POLISH each one independently, do NOT re-scope:
+- Keep each sequence's given participants and message ORDER. You MAY drop a redundant
+  message or merge two trivial consecutive self-calls, but NEVER invent a participant
+  or message.
+- Rewrite each message "label" as a short human verb phrase ("validate basket",
+  "persist order") — one line, no quotes/semicolons/newlines.
+- Set "name" to a concise human workflow title derived from the actual participants.
+  Never generic.
+- Keep each message "type" as given (sync/async/return).
+
+CRITICAL OUTPUT CONTRACT:
+- Return EXACTLY ONE refined workflow per input sequence, IN THE SAME ORDER.
+- The "workflows" array length MUST equal the number of input CandidateSequences.
+
+Return ONLY this JSON:
+{ "workflows": [
+  { "diagram_type":"sequence", "name":"<title>",
+    "participants":["",...],
+    "messages":[{"from":"","to":"","label":"","type":"sync|async|return"}] }
+] }
+"""
+
+
 INSTRUCTIONS_SEQUENCE = """You are a software architect. You receive RichFacts (static code analysis)
 and ArchitectureContext (repo-specific insights).
 
@@ -169,6 +198,38 @@ Rules:
   End the workflow with a "return" message back to the original caller.
 - Labels: one short verb phrase on a single line — no quotes, semicolons, or newlines.
 - Respond with ONLY the JSON object, no other text."""
+
+INSTRUCTIONS_CLASS_REFINE_BATCH = """You are a senior software architect refining SEVERAL focused UML class diagram
+views in a single pass. You receive a JSON array of CandidateViews — each one a
+small, pre-selected, already-bounded set of classes with candidate relationships —
+plus one shared ArchitectureContext.
+
+Apply the SAME per-view rules as for a single view, INDEPENDENTLY to each view:
+- Work ONLY within each view's given classes. NEVER add a class not in that view.
+- DROP only: test/mock/fixture classes; pure data carriers (DTO/Request/Response/*Args)
+  with no behaviour; or a class with no real relationship to any other kept class IN
+  THAT view.
+- MAXIMUM 5 methods and 5 fields per class (keep a constructor if present).
+- params: parameter NAMES only — never types, never defaults.
+- type / return_type: ONE simple identifier. NO <>, [], |, =, dots, or "?".
+- Every kept class MUST appear in at least one relationship; prefer structural edges
+  (inheritance, realization, composition) over loose "dependency" edges.
+- One edge per (from, to) pair. No self-loops.
+- "label": a short human theme name derived from the ACTUAL class names. Never generic.
+
+CRITICAL OUTPUT CONTRACT:
+- Return EXACTLY ONE refined view per input view, IN THE SAME ORDER.
+- The "views" array length MUST equal the number of input CandidateViews.
+
+Return ONLY this JSON:
+{ "views": [
+  { "diagram_type":"class", "label":"<short name>",
+    "classes":[{"name":"","fields":[{"name":"","type":"","visibility":"+"}],
+                "methods":[{"name":"","params":"","return_type":"","visibility":"+"}]}],
+    "relationships":[{"from":"","to":"","type":"inheritance|composition|aggregation|dependency|realization","label":""}] }
+] }
+"""
+
 
 INSTRUCTIONS_SEQUENCE_REFINE = """You are a software architect refining ONE pre-traced sequence diagram.
 You receive a CandidateSequence — participants and an ORDERED message list already
@@ -235,6 +296,62 @@ Classify every component with one of these layers — the renderer uses it for l
                      repo calls (external APIs, hosted DBs, SaaS services).
                      Do NOT use "external" for third-party Python libraries — those
                      belong in the dependency diagram, not here."""
+
+
+INSTRUCTIONS_COMPONENT_GROUP = """You are a senior software architect reading raw code clusters extracted from a repository.
+Your job is to produce the component diagram a human architect would actually draw — one that
+tells someone what this system DOES, not what folders exist in the repo.
+
+You receive:
+- "clusters": raw code clusters (id, layer, has_routes, has_db, is_infra, owns_entities, operation_evidence)
+- "arch_context": repo-level architectural context
+
+=== YOUR JOB ===
+Group the clusters into 4-7 architectural subsystems and name each one.
+
+STEP 1 — GROUP:
+- Read ALL clusters together. Ask: which clusters are doing the same architectural job?
+- Clusters in the same layer serving the same domain → ONE component
+- A set of feature controllers all serving the same domain → ONE component
+- A cluster that is just detail of another → absorb it
+- The infra/platform cluster (is_infra=true) → keep as ONE separate component
+- Only keep a cluster separate if it represents a genuinely DISTINCT subsystem
+- You MUST cover every input cluster id in at least one absorbed_ids list
+- Target: 4-7 components total
+
+STEP 2 — NAME:
+- Each component label must be an architectural concept a human would recognize
+- Test: "If the implementation framework were replaced, would this name still apply?"
+  If NO → rename it using operation_evidence alone
+- Good: "Metadata Management", "Ingestion Pipeline", "Access Control", "Query Engine", "API Gateway"
+- Bad: folder names, framework names, "Component 1", anything with Handler/Controller/Endpoint
+
+STEP 3 — INTERFACE:
+- One interface per component = the service contract it exposes to the rest of the system
+- Good: "Metadata API", "Ingestion Service", "Authentication", "Search Interface"
+- Bad: raw operation names, HTTP verb+path, lifecycle callbacks
+
+=== CONSTRAINTS ===
+- Every cluster id from the input MUST appear in exactly one absorbed_ids list — no cluster left out, no cluster in two groups
+- id: use one of the absorbed cluster ids as the canonical id (the most representative one)
+- layer: dominant layer across absorbed clusters
+- is_infra: true only if ALL absorbed clusters are infra
+- has_routes: true if ANY absorbed cluster has_routes
+- has_db: true if ANY absorbed cluster has_db
+
+Return ONLY this JSON:
+{
+  "grouped_components": [
+    {
+      "id": "<one of the absorbed cluster ids>",
+      "label": "<architectural subsystem name>",
+      "layer": "<presentation|application|domain|infrastructure|persistence>",
+      "interfaces": ["<one service contract name>"],
+      "absorbed_ids": ["<cluster_id_1>", "<cluster_id_2>", ...]
+    }
+  ]
+}
+"""
 
 
 INSTRUCTIONS_COMPONENT_REFINE = """You are a senior software architect NAMING a pre-computed UML component model.
@@ -330,6 +447,7 @@ Rules:
 class ClassDiagramAgent:
     def __init__(self):
         self._agent = build_agent(instructions=INSTRUCTIONS_CLASS_REFINE, name="LLDClass")
+        self._batch_agent = build_agent(instructions=INSTRUCTIONS_CLASS_REFINE_BATCH, name="LLDClassBatch")
 
     async def refine(self, candidate_view: dict, arch_context: dict) -> dict:
         prompt = (
@@ -344,12 +462,47 @@ class ClassDiagramAgent:
         out.setdefault("label", candidate_view.get("label", ""))
         return out
 
+    async def refine_many(self, candidate_views: list, arch_context: dict) -> list | None:
+        """Refine ALL views in a single LLM call (one request instead of N).
+
+        Returns a list aligned 1:1 with candidate_views. Any element the model
+        returns malformed falls back to that deterministic candidate view (no node
+        is ever dropped — the structure is already final, only naming is polished).
+        Returns None if the batch call fails or the array shape can't be trusted,
+        so the caller can fall back to the per-view path.
+        """
+        if not candidate_views:
+            return []
+        prompt = (
+            _GROUNDING
+            + "CandidateViews (JSON array — refine EACH independently, same order):\n\n"
+            + compact_json(candidate_views)
+            + "\n\nArchitectureContext (JSON):\n\n"
+            + compact_json(arch_context)
+            + "\n\nRefine and name all views now."
+        )
+        out = await run_agent_json(self._batch_agent, prompt, fallback=None)
+        if not isinstance(out, dict):
+            return None
+        refined = out.get("views")
+        if not isinstance(refined, list) or len(refined) != len(candidate_views):
+            return None
+        result = []
+        for cand, ref in zip(candidate_views, refined):
+            if isinstance(ref, dict) and ref.get("classes"):
+                ref.setdefault("label", cand.get("label", ""))
+                result.append(ref)
+            else:
+                result.append(cand)  # deterministic candidate — already renderable
+        return result
+
 
 
 class SequenceDiagramAgent:
     def __init__(self):
         self._agent = build_agent(instructions=INSTRUCTIONS_SEQUENCE, name="LLDSequence")
         self._refiner = build_agent(instructions=INSTRUCTIONS_SEQUENCE_REFINE, name="LLDSequenceRefine")
+        self._batch_refiner = build_agent(instructions=INSTRUCTIONS_SEQUENCE_REFINE_BATCH, name="LLDSequenceRefineBatch")
 
     async def refine(self, candidate: dict, arch_context: dict) -> dict:
         prompt = (
@@ -363,6 +516,39 @@ class SequenceDiagramAgent:
         out.setdefault("participants", candidate.get("participants", []))
         out.setdefault("messages", candidate.get("messages", []))
         return out
+
+    async def refine_many(self, candidates: list, arch_context: dict) -> list | None:
+        """Refine ALL workflows in a single LLM call (one request instead of N).
+
+        Returns a list aligned 1:1 with candidates. Any element the model returns
+        malformed falls back to that deterministic candidate (participants/messages
+        are already final — only labels are polished). Returns None if the batch
+        call fails or the array shape can't be trusted, so the caller can fall back
+        to the per-candidate path.
+        """
+        if not candidates:
+            return []
+        prompt = (
+            _GROUNDING
+            + "CandidateSequences (JSON array — refine EACH independently, same order):\n\n"
+            + compact_json(candidates)
+            + "\n\nArchitectureContext (JSON):\n\n" + compact_json(arch_context)
+            + "\n\nRefine and name all workflows now."
+        )
+        out = await run_agent_json(self._batch_refiner, prompt, fallback=None)
+        if not isinstance(out, dict):
+            return None
+        refined = out.get("workflows")
+        if not isinstance(refined, list) or len(refined) != len(candidates):
+            return None
+        result = []
+        for cand, ref in zip(candidates, refined):
+            if isinstance(ref, dict) and ref.get("messages") and ref.get("participants"):
+                ref.setdefault("name", cand.get("name", ""))
+                result.append(ref)
+            else:
+                result.append(cand)  # deterministic candidate — already renderable
+        return result
 
     async def analyze(self, rich_facts: dict, arch_context: dict) -> dict:
         prompt = _base_prompt(rich_facts, arch_context) + "\n\nProduce the sequence diagram JSON now."
@@ -381,52 +567,227 @@ class SequenceDiagramAgent:
 
 class ComponentDiagramAgent:
     def __init__(self):
-        self._agent = build_agent(instructions=INSTRUCTIONS_COMPONENT, name="LLDComponent")
+        self._agent   = build_agent(instructions=INSTRUCTIONS_COMPONENT,       name="LLDComponent")
         self._refiner = build_agent(instructions=INSTRUCTIONS_COMPONENT_REFINE, name="LLDComponentRefine")
+        self._grouper = build_agent(instructions=INSTRUCTIONS_COMPONENT_GROUP,  name="LLDComponentGroup")
 
     async def refine(self, candidate_view: dict, arch_context: dict) -> dict:
+        """Try architectural grouping first; fall back to naming-only if grouping fails."""
+        result = await self._group_architecturally(candidate_view, arch_context)
+        if result is None:
+            result = await self._name_only_fallback(candidate_view, arch_context)
+        return result
+
+    @staticmethod
+    def _merge_grouped(grouped_components: list, candidate_view: dict) -> dict:
+        """Pure Python merge: union structural fields from absorbed clusters, re-derive edges."""
+        from doc_agent.tools.component_arch import _capabilities
+        by_id = {c["id"]: c for c in candidate_view.get("components", [])}
+
+        cluster_to_group: dict[str, str] = {}
+        for g in grouped_components:
+            for cid in g.get("absorbed_ids", []):
+                cluster_to_group[cid] = g["id"]
+
+        components = []
+        for g in grouped_components:
+            absorbed = [by_id[cid] for cid in g.get("absorbed_ids", []) if cid in by_id]
+            if not absorbed:
+                continue
+
+            # union member_files preserving order
+            member_files: list = []
+            seen_files: set = set()
+            for c in absorbed:
+                for f in (c.get("member_files") or c.get("members") or []):
+                    if f not in seen_files:
+                        seen_files.add(f)
+                        member_files.append(f)
+
+            owns_entities = sorted({
+                e for c in absorbed for e in (c.get("owns_entities") or [])
+            })[:8]
+            evidence = {str(e).lower() for c in absorbed
+                        for e in (c.get("operation_evidence") or [])}
+
+            # layer: use LLM decision if valid, else dominant across absorbed
+            layer = (g.get("layer") or "").strip()
+            if layer not in ("presentation", "application", "domain", "infrastructure", "persistence"):
+                layer_counts = Counter(c.get("layer", "application") for c in absorbed)
+                layer = layer_counts.most_common(1)[0][0]
+
+            has_routes = any(c.get("has_routes", False) for c in absorbed)
+            has_db     = any(c.get("has_db",     False) for c in absorbed)
+            is_infra   = all(c.get("is_infra",   False) for c in absorbed)
+
+            # interface: validate LLM name against evidence, fall back to capability suffix
+            cap_slots  = _capabilities(layer, has_routes, has_db)
+            interfaces = cap_slots
+            ifaces = g.get("interfaces") or []
+            if ifaces:
+                candidate_name = str(ifaces[0]).strip()
+                if candidate_name and candidate_name.lower() not in evidence:
+                    interfaces = [candidate_name]
+
+            mod_counts      = Counter(c.get("module")       or "" for c in absorbed)
+            modlabel_counts = Counter(c.get("module_label") or "" for c in absorbed)
+            dominant_module       = mod_counts.most_common(1)[0][0]      if mod_counts      else ""
+            dominant_module_label = modlabel_counts.most_common(1)[0][0] if modlabel_counts else ""
+
+            components.append({
+                "id":            g["id"],
+                "label":         (g.get("label") or "").strip() or g["id"],
+                "module":        dominant_module,
+                "module_label":  dominant_module_label,
+                "layer":         layer,
+                "stereotype":    layer,
+                "members":       member_files[:12],
+                "member_files":  member_files,
+                "member_count":  len(member_files),
+                "is_infra":      is_infra,
+                "has_routes":    has_routes,
+                "has_db":        has_db,
+                "owns_entities": owns_entities,
+                "interfaces":    interfaces,
+            })
+
+        # re-derive edges: map original cluster-level edges through cluster_to_group
+        edge_weights: dict[tuple, int] = {}
+        for e in candidate_view.get("edges", []):
+            src = cluster_to_group.get(e.get("from", ""))
+            dst = cluster_to_group.get(e.get("to",   ""))
+            if not src or not dst or src == dst:
+                continue
+            key = (src, dst)
+            edge_weights[key] = edge_weights.get(key, 0) + e.get("weight", 1)
+
+        group_ids = {g["id"] for g in grouped_components}
+        dependencies = [
+            {"from": src, "to": dst, "label": "requires", "weight": w}
+            for (src, dst), w in sorted(edge_weights.items(), key=lambda kv: -kv[1])
+            if src in group_ids and dst in group_ids
+        ]
+
+        return {
+            "diagram_type": "component",
+            "components":   components,
+            "dependencies": dependencies,
+            "packages":     candidate_view.get("packages", []),
+        }
+
+    async def _group_architecturally(self, candidate_view: dict, arch_context: dict) -> dict | None:
+        """One LLM call: group ALL clusters into 4-7 architectural subsystems.
+        Returns None if the response is invalid so the caller falls back."""
+        clusters = candidate_view.get("components", [])
+        if not clusters:
+            return None
+        all_ids = {c["id"] for c in clusters}
+
+        lean_clusters = [
+            {
+                "id":                c["id"],
+                "layer":             c.get("layer"),
+                "has_routes":        c.get("has_routes", False),
+                "has_db":            c.get("has_db",     False),
+                "is_infra":          c.get("is_infra",   False),
+                "owns_entities":     (c.get("owns_entities") or [])[:4],
+                "operation_evidence": (c.get("operation_evidence") or [])[:10],
+            }
+            for c in clusters
+        ]
         prompt = (
-            _GROUNDING
-            + "CandidateComponentView (JSON):\n\n"
-            + compact_json(candidate_view)
+            "Clusters (JSON — group these into 4-7 architectural subsystems):\n\n"
+            + compact_json({"clusters": lean_clusters})
             + "\n\nArchitectureContext (JSON):\n\n"
             + compact_json(arch_context)
-            + "\n\nName and refine this component view now."
+            + "\n\nGroup and name the architectural subsystems now."
         )
-        out = await run_agent_json(self._refiner, prompt, fallback={"components": []})
+        out = await run_agent_json(self._grouper, prompt, fallback=None)
+        if not isinstance(out, dict):
+            return None
+        grouped = out.get("grouped_components")
+        if not isinstance(grouped, list) or not (3 <= len(grouped) <= 8):
+            return None
 
-        # Re-merge FROZEN structure: the LLM only NAMES; it cannot re-scope/relabel.
-        named = {c.get("id"): c for c in out.get("components", [])}
+        # validate: every cluster id covered exactly once, no invented ids
+        covered: set = set()
+        for g in grouped:
+            if not g.get("id") or not isinstance(g.get("absorbed_ids"), list):
+                return None
+            for cid in g["absorbed_ids"]:
+                if cid in covered:
+                    return None  # duplicate — cluster assigned to two groups
+                covered.add(cid)
+        if covered != all_ids:
+            return None  # missing or invented cluster ids
+
+        return self._merge_grouped(grouped, candidate_view)
+
+    async def _name_only_fallback(self, candidate_view: dict, arch_context: dict) -> dict:
+        """Original batch-naming logic — used when architectural grouping fails."""
+        _BATCH_SIZE = 15
+        all_components = candidate_view.get("components", [])
+        named: dict = {}
+        batches = [all_components[i:i + _BATCH_SIZE]
+                   for i in range(0, max(1, len(all_components)), _BATCH_SIZE)]
+        for batch in batches:
+            lean_batch = [
+                {
+                    "id":                 c["id"],
+                    "layer":              c.get("layer"),
+                    "module_label":       c.get("module_label"),
+                    "capabilities":       c.get("capabilities", []),
+                    "members":            c.get("members", [])[:4],
+                    "operation_evidence": c.get("operation_evidence", [])[:8],
+                }
+                for c in batch
+            ]
+            prompt = (
+                _GROUNDING
+                + "ComponentBatch (JSON — name each component, return same ids):\n\n"
+                + compact_json({"components": lean_batch})
+                + "\n\nArchitectureContext (JSON):\n\n"
+                + compact_json(arch_context)
+                + "\n\nName and refine these components now."
+            )
+            batch_out = await run_agent_json(self._refiner, prompt, fallback={"components": []})
+            for c in batch_out.get("components", []):
+                if c.get("id"):
+                    named[c["id"]] = c
+
         components = []
         for c in candidate_view.get("components", []):
             nc = named.get(c["id"], {})
             slots = c.get("capabilities", [])
             evidence = {str(e).lower() for e in c.get("operation_evidence", [])}
             ifaces = nc.get("interfaces") or []
-            interfaces = slots                          # safe default: deterministic suffix
+            interfaces = slots
             if len(ifaces) == len(slots) and slots:
                 candidate_names = [str(x).strip() for x in ifaces]
-                # reject any name that is just a raw operation echoed back (abstraction-level guard)
                 if all(name and name.lower() not in evidence for name in candidate_names):
                     interfaces = candidate_names
             components.append({
-                "id": c["id"],
-                "label": (nc.get("label") or "").strip() or c["id"],
-                "module": c.get("module"),
-                "module_label": c.get("module_label"),
-                "layer": c["layer"],
-                "stereotype": c.get("stereotype", c["layer"]),
-                "members": c.get("members", []),
-                "has_routes": c.get("has_routes", False),
-                "has_db": c.get("has_db", False),
+                "id":            c["id"],
+                "label":         (nc.get("label") or "").strip() or (c.get("label") or "").strip() or c["id"],
+                "module":        c.get("module"),
+                "module_label":  c.get("module_label"),
+                "layer":         c["layer"],
+                "stereotype":    c.get("stereotype", c["layer"]),
+                "members":       c.get("members", []),
+                "member_files":  c.get("member_files", c.get("members", [])),
+                "member_count":  c.get("member_count", len(c.get("members", []))),
+                "is_infra":      c.get("is_infra", False),
+                "has_routes":    c.get("has_routes", False),
+                "has_db":        c.get("has_db", False),
                 "owns_entities": c.get("owns_entities", []),
-                "interfaces": interfaces,
+                "interfaces":    interfaces,
             })
-        dependencies = [{"from": e["from"], "to": e["to"], "label": e.get("label", "requires"),
-                         "weight": e.get("weight", 1)}
-                        for e in candidate_view.get("edges", [])]
-        return {"diagram_type": "component", "components": components, "dependencies": dependencies,
-                "packages": candidate_view.get("packages", [])}
+        dependencies = [
+            {"from": e["from"], "to": e["to"], "label": e.get("label", "requires"), "weight": e.get("weight", 1)}
+            for e in candidate_view.get("edges", [])
+        ]
+        return {"diagram_type": "component", "components": components,
+                "dependencies": dependencies, "packages": candidate_view.get("packages", [])}
 
     async def analyze(self, rich_facts: dict, arch_context: dict) -> dict:
         prompt = _base_prompt(rich_facts, arch_context) + "\n\nProduce the component diagram JSON now."
