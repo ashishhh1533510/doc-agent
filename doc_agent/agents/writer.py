@@ -7,7 +7,7 @@ only writes and revises a README from facts. Documents ONLY what's there.
 
 import json
 
-from doc_agent.core.llm import build_agent
+from doc_agent.integrations.llm_provider import build_agent
 
 INSTRUCTIONS = """You are a technical writer. You are given a JSON description of a Python
 codebase's structure: its modules, functions, classes, signatures, and docstrings.

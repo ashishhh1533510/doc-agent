@@ -1,6 +1,8 @@
 """API layer: exposes the documentation and codebase-QA pipelines over HTTP (FastAPI)."""
 
 import time
+import zlib
+import base64
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -11,13 +13,13 @@ from pydantic import BaseModel
 from pathlib import Path
 from fastapi.responses import FileResponse
 
-from doc_agent.workflow.pipeline import DocumentationPipeline
+from doc_agent.orchestrators.pipeline import DocumentationPipeline
 # QA agent shelved — re-enable with the /ask endpoint + UI option below.
-# from doc_agent.workflow.qa import CodebaseQA
-from doc_agent.workflow.hld_pipeline import run_hld
-from doc_agent.workflow.lld_pipeline import run_lld
-from doc_agent.core.llm import start_run_metrics, summarize_run_metrics
-from doc_agent.core import gcp_monitoring
+# from doc_agent.orchestrators.qa import CodebaseQA
+from doc_agent.orchestrators.hld_pipeline import run_hld
+from doc_agent.orchestrators.lld_pipeline import run_lld
+from doc_agent.integrations.llm_provider import start_run_metrics, summarize_run_metrics
+from doc_agent.observability import gcp_monitoring
 
 
 async def _run_with_metrics(coro):
@@ -36,6 +38,36 @@ async def _run_with_metrics(coro):
         usage = summarize_run_metrics()
         usage["window"] = {"start": int(t0), "end": int(t1)}
         result["token_usage"] = usage
+    return result
+
+
+def _diagram_image_url(code: str, fmt: str = "svg") -> str:
+    """Build a Kroki render URL for a Mermaid diagram.
+
+    The image is fetched by the *client* (the marketplace browser renders an
+    <img src=...>), so this only constructs a string — it adds no network call,
+    latency, or failure mode on our side. Kroki's GET API expects the diagram
+    source zlib-compressed then url-safe-base64 encoded.
+    """
+    if not code:
+        return ""
+    packed = zlib.compress(code.encode("utf-8"), 9)
+    encoded = base64.urlsafe_b64encode(packed).decode("ascii")
+    return f"https://kroki.io/mermaid/{fmt}/{encoded}"
+
+
+def _attach_image_urls(result):
+    """Enrich a diagram result with rendered-image URLs alongside the Mermaid
+    source, so the marketplace can show a picture AND offer the raw .mmd."""
+    if not isinstance(result, dict):
+        return result
+    if isinstance(result.get("content"), str):
+        result["image_url"] = _diagram_image_url(result["content"])
+    diagrams = result.get("diagrams")
+    if isinstance(diagrams, list):
+        for d in diagrams:
+            if isinstance(d, dict) and isinstance(d.get("content"), str):
+                d["image_url"] = _diagram_image_url(d["content"])
     return result
 
 
@@ -151,6 +183,38 @@ async def generate_lld(req: LLDRequest):
     ))
 
 
+# ===== UNIFIED DIAGRAM ENDPOINT — one endpoint for the Agentic Marketplace =====
+# The marketplace binds an agent to a single endpoint, so this one entry point
+# routes to HLD or LLD via `mode` and returns both the Mermaid source and a
+# rendered-image URL.
+class DiagramRequest(BaseModel):
+    project_path: str
+    mode: str = "hld"               # hld | lld
+    output_type: str = "combined"   # HLD: combined | context | container
+    diagram_type: str = "class"     # LLD: class | sequence | component | dependency
+    output_path: str | None = None
+    private_access_token: str | None = None
+
+
+@app.post("/generate/diagram/")
+async def generate_diagram(req: DiagramRequest):
+    token = (req.private_access_token or "").strip() or None
+    mode = (req.mode or "hld").strip().lower()
+    if mode == "lld":
+        diagram_type = (req.diagram_type or "class").strip() or "class"
+        result = await _run_with_metrics(run_lld(
+            req.project_path, diagram_type=diagram_type,
+            output_path=req.output_path, token=token,
+        ))
+    else:
+        output_type = (req.output_type or "combined").strip() or "combined"
+        result = await _run_with_metrics(run_hld(
+            req.project_path, output_type=output_type,
+            output_path=req.output_path, token=token,
+        ))
+    return _attach_image_urls(result)
+
+
 class VerifyCallsRequest(BaseModel):
     start: int
     end: int
@@ -180,7 +244,7 @@ def ui():
     return FileResponse(Path(__file__).parent / "index.html")
 
 # Export THIS app's OpenAPI (Swagger) spec to openapi.json:
-#   python -m doc_agent.api.app
+#   python -m doc_agent.main
 if __name__ == "__main__":
     from doc_agent.tools.output import save_json
 

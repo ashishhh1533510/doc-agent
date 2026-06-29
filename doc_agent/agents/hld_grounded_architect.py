@@ -22,7 +22,7 @@ pipeline always produces a renderable output.
 """
 from __future__ import annotations
 
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect producing a C4 architecture diagram.
 

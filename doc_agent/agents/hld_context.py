@@ -12,7 +12,7 @@ the LLD pipeline) so the two architecture models stay independent: changing one 
 never change the other. See workflow/hld_pipeline.py.
 """
 
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect analyzing an unfamiliar codebase.
 

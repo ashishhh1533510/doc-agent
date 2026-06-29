@@ -2888,7 +2888,7 @@ def test_score_hld_credits_consolidated_coverage():
     from doc_agent.tools.container_model import (
         consolidate_containers_for_abstraction, validate_model,
     )
-    from doc_agent.workflow.fidelity_scorer import _score_hld
+    from doc_agent.evaluation.fidelity_scorer import _score_hld
     conts = _many_app_containers(24, group=lambda i: f"Domain {i % 4}")
     rels = [{"from": f"svc{i:02d}", "to": f"svc{(i + 1) % 24:02d}", "label": "calls"}
             for i in range(24)]

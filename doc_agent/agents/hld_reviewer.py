@@ -5,7 +5,7 @@ Checks a C4 JSON model against RichFacts + ArchitectureContext and returns a ver
 Used by hld_pipeline.py to drive the iteration loop.
 """
 
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a strict HLD architecture reviewer.
 

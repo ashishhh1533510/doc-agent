@@ -10,7 +10,7 @@ work on codebases too large to fit entirely in a prompt.
 import faiss
 import numpy as np
 
-from doc_agent.core.llm import embed_texts
+from doc_agent.integrations.llm_provider import embed_texts
 
 
 def _facts_to_chunks(facts: list[dict]) -> list[dict]:

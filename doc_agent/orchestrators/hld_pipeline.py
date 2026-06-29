@@ -58,7 +58,7 @@ from doc_agent.tools.container_model import (
 from doc_agent.tools.manifest_parser import parse_all_manifests
 from doc_agent.agents.hld_grounded_architect import HLDGroundedArchitect
 from doc_agent.tools.diagram_validator import validate_mermaid
-from doc_agent.workflow.fidelity_scorer import compute_accuracy
+from doc_agent.evaluation.fidelity_scorer import compute_accuracy
 
 log = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ async def run_hld(
         return result
 
 
-# Quick test: python -m doc_agent.workflow.hld_pipeline <project_path> [combined]
+# Quick test: python -m doc_agent.orchestrators.hld_pipeline <project_path> [combined]
 if __name__ == "__main__":
     import asyncio
     import sys

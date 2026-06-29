@@ -8,7 +8,7 @@ Used by lld_pipeline.py to drive the iteration loop.
 
 import json
 
-from doc_agent.core.llm import build_agent, run_agent_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json
 
 INSTRUCTIONS = """You are a meticulous architecture reviewer specialising in LLD diagrams.
 You are given four inputs:

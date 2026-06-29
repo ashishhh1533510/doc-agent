@@ -6,7 +6,7 @@ which workflows matter, what tech stack, what constraints. Output is passed to b
 LLD agents so every diagram is grounded in this repo's real structure, not a generic template.
 """
 
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect analyzing an unfamiliar codebase.
 

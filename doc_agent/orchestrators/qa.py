@@ -6,7 +6,7 @@ The codebase-QA pipeline: RAG orchestration.
 """
 
 from doc_agent.tools.extractor import extract_from_directory
-from doc_agent.rag.indexer import CodebaseIndex
+from doc_agent.retrieval.indexer import CodebaseIndex
 from doc_agent.agents.qa import QAAgent
 from doc_agent.tools.input_resolver import resolve_input
 
@@ -29,7 +29,7 @@ class CodebaseQA:
         }
 
 
-# Run from the terminal: python -m doc_agent.workflow.qa doc_agent "your question"
+# Run from the terminal: python -m doc_agent.orchestrators.qa doc_agent "your question"
 if __name__ == "__main__":
     import asyncio
     import sys

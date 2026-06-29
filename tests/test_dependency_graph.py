@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from doc_agent.tools.dependency_graph import build_dependency_model, MAX_INTERNAL_PACKAGES, MAX_EDGES, MAX_EXTERNAL_PACKAGES
 from doc_agent.tools.output import render_dependency_diagram
-from doc_agent.core.llm import run_agent_json
+from doc_agent.integrations.llm_provider import run_agent_json
 
 
 # ── tiny harness ──────────────────────────────────────────────────────────────
@@ -357,7 +357,7 @@ def test_renderer_integration():
 def test_fallback_on_bad_json():
     """run_agent_json must return the fallback value when the agent never returns
     valid JSON, rather than raising ValueError."""
-    import doc_agent.core.llm as _llm_module
+    import doc_agent.integrations.llm_provider as _llm_module
 
     original_run_agent = _llm_module.run_agent
 
@@ -384,7 +384,7 @@ def test_fallback_on_bad_json():
 
 def test_no_fallback_raises():
     """run_agent_json without fallback must still raise ValueError on bad JSON."""
-    import doc_agent.core.llm as _llm_module
+    import doc_agent.integrations.llm_provider as _llm_module
 
     original_run_agent = _llm_module.run_agent
 

@@ -7,7 +7,7 @@ either approved, or a list of specific issues for the writer to fix.
 
 import json
 
-from doc_agent.core.llm import build_agent, run_agent_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json
 
 INSTRUCTIONS = """You are a meticulous documentation reviewer. You are given:
 1. The ground-truth facts about a codebase, as JSON.

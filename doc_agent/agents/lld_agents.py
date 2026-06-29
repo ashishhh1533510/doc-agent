@@ -6,7 +6,7 @@ Each also has a revise() method for the iteration loop in lld_pipeline.py.
 """
 
 from collections import Counter
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 # ---------------------------------------------------------------------------
 # Shared helpers

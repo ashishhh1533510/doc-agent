@@ -15,7 +15,7 @@ Any structural invention (new ids, renames, splits) the LLM attempts is silently
 discarded — drift back to capability-style boxes is impossible by design.
 """
 
-from doc_agent.core.llm import build_agent, run_agent_json, compact_json
+from doc_agent.integrations.llm_provider import build_agent, run_agent_json, compact_json
 
 INSTRUCTIONS = """You are a software architect writing display labels for a C4 architecture diagram.
 

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from doc_agent.tools.output import render_component_view_set
 from doc_agent.tools.view_planner import plan_single_view
-from doc_agent.workflow.fidelity_scorer import compute_accuracy
+from doc_agent.evaluation.fidelity_scorer import compute_accuracy
 
 _FAILURES: list[str] = []
 _PASS = 0

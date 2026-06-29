@@ -18,7 +18,7 @@ from doc_agent.tools.component_clusters import slim_components, select_files, pa
 from doc_agent.tools.extractor import extract_rich_from_directory
 from doc_agent.tools.input_resolver import resolve_input
 from doc_agent.tools.manifest_parser import parse_all_manifests
-from doc_agent.workflow.hld_pipeline import _derive_repo_name
+from doc_agent.orchestrators.hld_pipeline import _derive_repo_name
 from doc_agent.tools.output import (
     render_class_diagram, render_sequence_diagram,
     render_component_diagram, render_dependency_diagram, save_text,
@@ -38,8 +38,8 @@ from doc_agent.tools.dependency_graph import build_dependency_model
 
 from doc_agent.agents.lld_reviewer import LLDReviewerAgent
 from doc_agent.tools.diagram_validator import validate_mermaid
-from doc_agent.workflow.grounding import check_grounding
-from doc_agent.workflow.fidelity_scorer import compute_accuracy
+from doc_agent.services.grounding import check_grounding
+from doc_agent.evaluation.fidelity_scorer import compute_accuracy
 
 
 
@@ -377,7 +377,7 @@ async def run_lld(
         return result
 
 
-# Quick test: python -m doc_agent.workflow.lld_pipeline <project_path> [class|sequence|component|dependency]
+# Quick test: python -m doc_agent.orchestrators.lld_pipeline <project_path> [class|sequence|component|dependency]
 if __name__ == "__main__":
     import asyncio
     import sys

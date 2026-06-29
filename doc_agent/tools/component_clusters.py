@@ -348,7 +348,7 @@ def budget_facts_blob(blob: dict, max_tokens: int = 120_000) -> dict:
     the same `len(json)//4` heuristic used elsewhere. No-op when already small
     (small/medium repos are returned untouched)."""
     import copy
-    from doc_agent.core.llm import compact_json
+    from doc_agent.integrations.llm_provider import compact_json
 
     def size(b) -> int:
         return len(compact_json(b)) // 4

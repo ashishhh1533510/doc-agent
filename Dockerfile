@@ -20,4 +20,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Render injects $PORT at runtime — bind to it, never hardcode 8000.
-CMD ["sh", "-c", "uvicorn doc_agent.api.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn doc_agent.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

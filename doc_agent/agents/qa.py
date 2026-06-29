@@ -5,7 +5,7 @@ It receives a question plus the facts RAG retrieved, and answers using only
 those facts -- the same no-hallucination discipline as the writer.
 """
 
-from doc_agent.core.llm import build_agent
+from doc_agent.integrations.llm_provider import build_agent
 
 INSTRUCTIONS = """You answer questions about a Python codebase. You are given a question and a set of
 retrieved facts (functions and classes) from the codebase. Answer using ONLY those facts. If the

@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from doc_agent.workflow.fidelity_scorer import compute_accuracy, _compose, _window
+from doc_agent.evaluation.fidelity_scorer import compute_accuracy, _compose, _window
 
 _FAILURES: list[str] = []
 _PASS = 0

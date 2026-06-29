@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc-agent"
+version = "0.1.0"
+description = "Agentic documentation generator: produces C4 HLD/LLD diagrams and docs from a codebase."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "python-dotenv",
+    "pyyaml",
+    "openai",
+    "faiss-cpu",
+    "numpy",
+    "gitpython",
+    "agent-framework",
+    "diagrams",
+    "markdown",
+    "graphviz",
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-c-sharp",
+    "tree-sitter-java",
+    "networkx",
+]
+
+[project.optional-dependencies]
+# Optional: "verified vs Google" call-count cross-check (observability/gcp_monitoring.py)
+monitoring = ["google-cloud-monitoring"]
+
+# Run the API:  uvicorn doc_agent.main:app
+
+[tool.setuptools.packages.find]
+include = ["doc_agent*"]
+
+[tool.setuptools.package-data]
+doc_agent = ["index.html"]

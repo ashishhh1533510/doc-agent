@@ -90,7 +90,7 @@ class DocumentationPipeline:
             return result
 
 
-# Generate + save: python -m doc_agent.workflow.pipeline <project> <format> <output_file>
+# Generate + save: python -m doc_agent.orchestrators.pipeline <project> <format> <output_file>
 if __name__ == "__main__":
     import asyncio
     import sys

@@ -1,0 +1,99 @@
+# VAM Enterprise Agent Specification
+# Agent: Architecture Design Agent
+
+version: "1.0.0"
+
+servers:
+  - url: "https://doc-agent-z8ym.onrender.com/generate/diagram/"
+    description: "Architecture Design Agent — HLD (C4 Combined) + LLD (Class/Sequence/Component/Dependency)"
+
+ui_preferences:
+  execution:
+    mode: synchronous
+    loader_style: spinner
+
+  inputs:
+    - name: "project_path"
+      label: "GitHub Repository URL"
+      widget_type: "text"
+      placeholder: "https://github.com/owner/repo"
+      validation:
+        required: true
+
+    # Option values are sent verbatim as the JSON body value, so they must match
+    # exactly what the API expects (lowercase tokens), not friendly labels.
+    - name: "mode"
+      label: "Design Level"
+      widget_type: "dropdown"
+      options:
+        - "hld"
+        - "lld"
+      default: "hld"
+      validation:
+        required: true
+
+    - name: "output_type"
+      label: "HLD View (used when Design Level = hld)"
+      widget_type: "dropdown"
+      options:
+        - "combined"
+        - "context"
+        - "container"
+      default: "combined"
+      validation:
+        required: false
+
+    - name: "diagram_type"
+      label: "LLD Diagram (used when Design Level = lld)"
+      widget_type: "dropdown"
+      options:
+        - "class"
+        - "sequence"
+        - "component"
+        - "dependency"
+      default: "class"
+      validation:
+        required: false
+
+    - name: "private_access_token"
+      label: "Access Token"
+      widget_type: "password"
+      placeholder: "Optional token for private repositories"
+      validation:
+        required: false
+
+  outputs:
+    primary_view: "dashboard"
+
+    data_mapping:
+      - key: "image_url"
+        label: "Architecture Diagram"
+        widget: "image"
+
+      - key: "content"
+        label: "Mermaid Source (.mmd)"
+        widget: "code"
+
+      - key: "output_type"
+        label: "HLD View"
+        widget: "text"
+
+      - key: "diagram_type"
+        label: "LLD Diagram Type"
+        widget: "text"
+
+      - key: "accuracy.score"
+        label: "Accuracy Score (/100)"
+        widget: "text"
+
+      - key: "accuracy.grade"
+        label: "Fidelity Grade"
+        widget: "text"
+
+      - key: "token_usage.total_tokens"
+        label: "Total Tokens"
+        widget: "text"
+
+      - key: "token_usage.llm_calls"
+        label: "LLM Calls"
+        widget: "text"
