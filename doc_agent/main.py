@@ -196,7 +196,12 @@ class DiagramRequest(BaseModel):
     private_access_token: str | None = None
 
 
+# Register both with- and without-trailing-slash so clients that strip the slash
+# (e.g. the marketplace proxy) hit the handler directly instead of triggering a
+# 307 redirect — some proxies downgrade the redirected POST to GET, which lands
+# as "405 Method Not Allowed" on the POST-only route.
 @app.post("/generate/diagram/")
+@app.post("/generate/diagram", include_in_schema=False)
 async def generate_diagram(req: DiagramRequest):
     token = (req.private_access_token or "").strip() or None
     mode = (req.mode or "hld").strip().lower()
