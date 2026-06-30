@@ -189,11 +189,16 @@ async def generate_lld(req: LLDRequest):
 # rendered-image URL.
 class DiagramRequest(BaseModel):
     project_path: str
-    mode: str = "hld"               # hld | lld
-    output_type: str = "combined"   # HLD: combined | context | container
-    diagram_type: str = "class"     # LLD: class | sequence | component | dependency
+    # Single selector drives everything: "hld" (C4 Combined) or one of the LLD
+    # types (class | sequence | component | dependency). `mode`/`output_type`
+    # stay optional for backward compatibility / explicit control.
+    diagram_type: str = "hld"
+    mode: str = ""                  # optional override: hld | lld
     output_path: str | None = None
     private_access_token: str | None = None
+
+
+_LLD_TYPES = {"class", "sequence", "component", "dependency"}
 
 
 # Register both with- and without-trailing-slash so clients that strip the slash
@@ -204,17 +209,22 @@ class DiagramRequest(BaseModel):
 @app.post("/generate/diagram", include_in_schema=False)
 async def generate_diagram(req: DiagramRequest):
     token = (req.private_access_token or "").strip() or None
-    mode = (req.mode or "hld").strip().lower()
+    sel = (req.diagram_type or "").strip().lower()
+    mode = (req.mode or "").strip().lower()
+    # Derive HLD vs LLD from the single selector unless mode is set explicitly.
+    if mode not in ("hld", "lld"):
+        mode = "lld" if sel in _LLD_TYPES else "hld"
+
     if mode == "lld":
-        diagram_type = (req.diagram_type or "class").strip() or "class"
+        diagram_type = sel if sel in _LLD_TYPES else "class"
         result = await _run_with_metrics(run_lld(
             req.project_path, diagram_type=diagram_type,
             output_path=req.output_path, token=token,
         ))
     else:
-        output_type = (req.output_type or "combined").strip() or "combined"
+        # HLD has a single view — C4 Combined.
         result = await _run_with_metrics(run_hld(
-            req.project_path, output_type=output_type,
+            req.project_path, output_type="combined",
             output_path=req.output_path, token=token,
         ))
     return _attach_image_urls(result)

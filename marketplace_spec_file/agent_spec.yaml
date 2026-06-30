@@ -6,7 +6,9 @@ info:
   description: "Generates repo-specific architecture diagrams — HLD (C4 Combined: Context + Container) and LLD (Class, Sequence, Component, Dependency) — from a GitHub repository or local project path. Returns Mermaid source plus a rendered-image URL, a validation report, an accuracy score, and LLM token-usage metrics."
 
 servers:
-  - url: "https://doc-agent-z8ym.onrender.com"
+  # Full endpoint URL: the marketplace proxy dispatches to servers.url directly
+  # and does NOT append the path below, so the path must live in the server URL.
+  - url: "https://doc-agent-z8ym.onrender.com/generate/diagram/"
 
 paths:
   /generate/diagram/:
@@ -22,22 +24,16 @@ paths:
                 project_path:
                   type: string
                   description: "GitHub repository URL or local project path."
-                  example: "https://github.com/psf/requests"
-                mode:
-                  type: string
-                  description: "Diagram family: 'hld' for High-Level Design, 'lld' for Low-Level Design."
-                  enum: [hld, lld]
-                  default: hld
-                output_type:
-                  type: string
-                  description: "HLD view (used when mode=hld)."
-                  enum: [combined, context, container]
-                  default: combined
+                  example: "https://github.com/ashishhh1533510/Architecture-Design-Agent"
                 diagram_type:
                   type: string
-                  description: "LLD diagram (used when mode=lld)."
-                  enum: [class, sequence, component, dependency]
-                  default: class
+                  description: "Diagram to generate. 'hld' = C4 Combined (Context + Container) High-Level Design; the others are Low-Level Design diagrams. The backend derives HLD vs LLD from this value."
+                  enum: [hld, class, sequence, component, dependency]
+                  default: hld
+                mode:
+                  type: string
+                  description: "Optional override of the diagram family. Normally derived from diagram_type; set only to force 'hld' or 'lld'."
+                  enum: [hld, lld]
                 private_access_token:
                   type: string
                   description: "Optional access token for private repositories."

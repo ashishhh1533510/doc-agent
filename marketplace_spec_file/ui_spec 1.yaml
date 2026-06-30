@@ -16,44 +16,26 @@ ui_preferences:
     - name: "project_path"
       label: "GitHub Repository URL"
       widget_type: "text"
-      placeholder: "https://github.com/owner/repo"
+      placeholder: "https://github.com/ashishhh1533510/Architecture-Design-Agent"
       validation:
         required: true
 
-    # Option values are sent verbatim as the JSON body value, so they must match
-    # exactly what the API expects (lowercase tokens), not friendly labels.
-    - name: "mode"
-      label: "Design Level"
+    # One dropdown drives everything. Option values are sent verbatim as the JSON
+    # body value for `diagram_type`; the backend derives HLD vs LLD from the
+    # choice ("hld" = C4 Combined HLD; the rest = the matching LLD diagram).
+    # HLD has a single view (C4 Combined), so it is one option — no sub-selector.
+    - name: "diagram_type"
+      label: "Diagram Type"
       widget_type: "dropdown"
       options:
         - "hld"
-        - "lld"
-      default: "hld"
-      validation:
-        required: true
-
-    - name: "output_type"
-      label: "HLD View (used when Design Level = hld)"
-      widget_type: "dropdown"
-      options:
-        - "combined"
-        - "context"
-        - "container"
-      default: "combined"
-      validation:
-        required: false
-
-    - name: "diagram_type"
-      label: "LLD Diagram (used when Design Level = lld)"
-      widget_type: "dropdown"
-      options:
         - "class"
         - "sequence"
         - "component"
         - "dependency"
-      default: "class"
+      default: "hld"
       validation:
-        required: false
+        required: true
 
     - name: "private_access_token"
       label: "Access Token"
